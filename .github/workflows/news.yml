@@ -1,0 +1,45 @@
+name: news
+
+on:
+  # Расписание ВЫКЛЮЧЕНО, пока не проверишь всё вручную.
+  # Чтобы включить: убери "#" у трёх строк ниже (раз в 3 часа).
+  # schedule:
+  #   - cron: "17 */3 * * *"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Пробный режим (ничего не публиковать)"
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: news
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - name: Run
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || 'false' }}
+        run: python newsbot.py
+      - name: Save state
+        if: always()
+        run: |
+          git config user.name "newsbot"
+          git config user.email "newsbot@users.noreply.github.com"
+          git add data/state.json
+          git diff --cached --quiet || (git commit -m "state" && git pull --rebase && git push)
