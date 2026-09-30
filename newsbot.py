@@ -282,6 +282,10 @@ def parse_telegram(content: bytes, src) -> list[Item]:
         lines = [ln.strip() for ln in body.get_text().split("\n") if ln.strip()]
         if not lines:
             continue
+        lines[-1] = re.sub(r"(\s*@\w{4,})+\s*$", "", lines[-1]).strip()  # подпись «@канал»
+        lines = [ln for ln in lines if ln]
+        if not lines:
+            continue
         time_tag = m.select_one("time[datetime]")
         pub = parse_iso(time_tag["datetime"]) if time_tag else None
         it = make_item(src, tg_title(lines[0]), a["href"], " ".join(lines), pub)
@@ -309,9 +313,13 @@ def fetch_ctftime(src) -> list[Item]:
             continue
         if float(e.get("weight") or 0) < float(src.get("min_weight", 0)):
             continue
+        if src.get("online_only") and e.get("onsite"):
+            continue
         where = f"очно ({e.get('location') or '?'})" if e.get("onsite") else "онлайн"
         weight = float(e.get("weight") or 0)
-        restr = {"Open": "открытое"}.get(e.get("restrictions"), e.get("restrictions") or "?")
+        raw = e.get("restrictions") or "?"
+        restr = {"open": "открытое", "academic": "академическое (студенческие команды)",
+                 "prequalified": "по отбору", "invite-only": "по приглашениям"}.get(raw.lower(), raw)
         dates = f"{fmt_dt(start)} — {fmt_dt(end)}" if end else fmt_dt(start)
         lines = [f"Даты: {dates} (UTC+{TZ_HOURS})",
                  f"Формат: {e.get('format') or '?'}, {where}",
@@ -320,7 +328,8 @@ def fetch_ctftime(src) -> list[Item]:
         it = make_item(src, title, link, "\n".join(lines), None)
         it.start = start
         logo = e.get("logo") or ""
-        set_image(it, src, "https://ctftime.org" + logo if logo.startswith("/") else logo)
+        set_image(it, src, logo if logo.startswith("http")
+                  else ("https://ctftime.org/" + logo.lstrip("/") if logo else None))
         items.append(it)
     return items
 
@@ -350,16 +359,29 @@ def fetch_codeforces(src) -> list[Item]:
 
 
 def fetch_devpost(src) -> list[Item]:
-    data = json.loads(http_get(
-        "https://devpost.com/api/hackathons?status[]=open&status[]=upcoming&order_by=deadline&page=1"))
-    hacks = data.get("hackathons") if isinstance(data, dict) else None
+    hacks: list[dict] = []
+    for page in (1, 2, 3):  # сортировка по дедлайну: на первой странице те, что вот-вот закончатся
+        try:
+            data = json.loads(http_get(
+                f"https://devpost.com/api/hackathons?status[]=open&status[]=upcoming&order_by=deadline&page={page}"))
+        except Exception:
+            if page == 1:
+                raise
+            break
+        chunk = data.get("hackathons") if isinstance(data, dict) else None
+        if not chunk:
+            break
+        hacks += chunk
+        time.sleep(PAUSE)
     if not hacks:
         raise RuntimeError("пустой ответ Devpost")
     items = []
+    seen_urls: set[str] = set()
     for h in hacks:
         title, link = clean_text(h.get("title", "")), h.get("url")
-        if not title or not link:
+        if not title or not link or link in seen_urls:
             continue
+        seen_urls.add(link)
         loc = clean_text((h.get("displayed_location") or {}).get("location", ""))
         if loc and "online" not in loc.lower():  # очные за границей не нужны
             continue

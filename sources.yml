@@ -32,8 +32,8 @@ ad_words:
 topics:
   ИИ: ['\bии\b', 'нейросет', 'искусственн\w+ интеллект', 'chatgpt', 'openai', 'anthropic', 'claude', 'gemini', '\bllm\b', '\bgpt', 'deepseek', 'copilot']
   безопасность: ['уязвимост', 'взлом', 'хакер', 'утечк', 'кибер', 'фишинг', 'malware', 'ransomware', '\bcve-', 'шифровальщик', 'вирус']
-  разработка: ['\bpython', '\brust\b', '\bgo\b', 'golang', '\bphp\b', 'javascript', 'typescript', 'github', 'разработчик', 'программист', 'фреймворк', 'open source', 'linux', 'docker', '\bapi\b', 'баз\w+ данных']
-  железо: ['процессор', 'видеокарт', '\bssd\b', 'nvidia', '\bamd\b', 'intel', 'смартфон', 'ноутбук', 'чип', 'оперативн', 'гаджет', 'iphone', 'android']
+  разработка: ['\bpython', '\brust\b', '\bgo\b', 'golang', '\bphp\b', 'javascript', 'typescript', 'kotlin', 'github', 'программист', 'программирован', 'фреймворк', 'open source', 'linux', 'docker', 'devops', 'репозитор', 'компилятор', '\bapi\b', 'баз\w+ данных']
+  железо: ['процессор', 'видеокарт', '\bssd\b', 'nvidia', '\bamd\b', '\bintel\b', 'смартфон', 'ноутбук', 'чипсет', 'оперативн', 'гаджет', 'iphone', '\bибп\b', 'монитор', 'роутер', 'сервер', 'видеопамят']
   игры: ['\bигр', 'steam', 'playstation', 'xbox', 'nintendo', 'геймер']
   наука: ['учёны', 'ученые', 'исследовател', 'физик', 'астроном', 'космос', 'биолог', 'генетик']
 
@@ -44,10 +44,10 @@ sources:
   - {name: Proglib,   type: rss, url: "https://proglib.io/feed",                 tag: разработка}
   - {name: vc.ru,     type: rss, url: "https://vc.ru/rss/all",                   tag: технологии}
   # --- Гаджеты и железо ---
-  - {name: 3DNews,      enabled: false, type: rss, url: "https://3dnews.ru/breakingnews/rss/", tag: железо}  # адрес 404, нужен другой
-  - {name: iXBT,        type: rss, url: "https://www.ixbt.com/export/news.rss",   tag: железо}
-  - {name: Overclockers, type: rss, url: "https://overclockers.ru/rss/all.rss",   tag: железо}
-  - {name: CNews,       type: rss, url: "https://www.cnews.ru/inc/rss/news.xml",  tag: железо}
+  - {name: 3DNews,      enabled: false, type: rss, url: "https://3dnews.ru/breakingnews/rss/", tag: технологии}  # адрес 404, нужен другой
+  - {name: iXBT,        type: rss, url: "https://www.ixbt.com/export/news.rss",   tag: технологии}
+  - {name: Overclockers, type: rss, url: "https://overclockers.ru/rss/all.rss",   tag: технологии}
+  - {name: CNews,       type: rss, url: "https://www.cnews.ru/inc/rss/news.xml",  tag: технологии}
   # --- Наука и факты ---
   - {name: N+1,          type: rss, url: "https://nplus1.ru/rss",                 tag: наука}
   - {name: Naked Science, type: rss, url: "https://naked-science.ru/feed",        tag: наука}
@@ -58,7 +58,7 @@ sources:
   - {name: PrepodSteam, type: telegram, preview: false, channel: prepodsteam,        tag: игры}
 
   # === ВОЗМОЖНОСТИ: соревнования, гранты, стипендии (свои лимиты, посты со значком 🎯) ===
-  - {name: CTFtime,    type: ctftime, preview: false,    kind: opportunity, tag: ctf,       days_ahead: 30}
+  - {name: CTFtime,    type: ctftime, preview: false,    kind: opportunity, tag: ctf,       days_ahead: 30, online_only: true}
   - {name: Codeforces, type: codeforces, preview: false, kind: opportunity, tag: олимпиады, days_ahead: 14}
   - {name: Devpost,    type: devpost,    kind: opportunity, tag: хакатоны}
   - {name: OpportunityDesk,      type: rss, url: "https://opportunitydesk.org/feed/",            kind: opportunity, tag: гранты}
