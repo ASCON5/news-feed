@@ -165,6 +165,15 @@ def fetch_rss(src) -> list[Item]:
     return items
 
 
+def tg_title(line: str) -> str:
+    if len(line) <= 140:
+        return line
+    m = re.search(r"[.!?](\s|$)", line[:220])
+    if m and m.end() > 40:
+        return line[: m.end()].strip()
+    return truncate(line, 140)
+
+
 def parse_telegram(content: bytes, src) -> list[Item]:
     soup = BeautifulSoup(content, "html.parser")
     msgs = soup.select(".tgme_widget_message")
@@ -183,7 +192,7 @@ def parse_telegram(content: bytes, src) -> list[Item]:
             continue
         time_tag = m.select_one("time[datetime]")
         pub = parse_iso(time_tag["datetime"]) if time_tag else None
-        items.append(make_item(src, truncate(lines[0], 140), a["href"], " ".join(lines), pub))
+        items.append(make_item(src, tg_title(lines[0]), a["href"], " ".join(lines), pub))
     return items
 
 
@@ -253,6 +262,9 @@ def fetch_devpost(src) -> list[Item]:
             continue
         loc = clean_text((h.get("displayed_location") or {}).get("location", ""))
         if loc and "online" not in loc.lower():  # очные за границей не нужны
+            continue
+        left = clean_text(h.get("time_left_to_submission", "")).lower()
+        if "hour" in left or "minute" in left:  # до конца меньше суток, поздно
             continue
         lines = []
         if h.get("submission_period_dates"):

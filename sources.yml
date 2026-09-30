@@ -51,6 +51,7 @@ sources:
   - {name: Codeforces, type: codeforces, kind: opportunity, tag: олимпиады, days_ahead: 14}
   - {name: Devpost,    type: devpost,    kind: opportunity, tag: хакатоны}
   - {name: OpportunityDesk,      type: rss, url: "https://opportunitydesk.org/feed/",            kind: opportunity, tag: гранты}
-  - {name: Scholars4Dev,         type: rss, url: "https://www.scholars4dev.com/feed/",            kind: opportunity, tag: стипендии}
-  - {name: ScholarshipPositions, type: rss, url: "https://www.scholarship-positions.com/feed/",   kind: opportunity, tag: стипендии}
+  # Scholars4Dev и ScholarshipPositions отключены: отдали не RSS, нужны другие адреса
+  - {name: Scholars4Dev, enabled: false,         type: rss, url: "https://www.scholars4dev.com/feed/",            kind: opportunity, tag: стипендии}
+  - {name: ScholarshipPositions, enabled: false, type: rss, url: "https://www.scholarship-positions.com/feed/",   kind: opportunity, tag: стипендии}
   - {name: EduGrants, type: telegram, channel: edugrandsuz_results, kind: opportunity, tag: гранты}
