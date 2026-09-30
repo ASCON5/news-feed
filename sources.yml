@@ -1,15 +1,19 @@
 # Настройки и список источников. Отключить источник: enabled: false
-# ВАЖНО: адреса RSS я не мог проверить отсюда. Первый dry-run покажет, какие работают.
+# ВАЖНО: часть адресов я не мог проверить отсюда. Пробный запуск (dry_run) покажет, какие работают.
 
 settings:
-  max_age_hours: 24        # старше этого возраста записи игнорируются
-  max_posts_per_run: 5     # максимум постов за один запуск
-  max_posts_per_day: 20    # максимум постов за сутки
+  max_age_hours: 24        # новости старше этого возраста игнорируются
+  max_posts_per_run: 5     # новости: максимум за один запуск
+  max_posts_per_day: 20    # новости: максимум за сутки
+  max_opportunities_per_run: 5   # соревнования, гранты, стипендии: за запуск
+  max_opportunities_per_day: 12  # ...и за сутки (отдельно от новостей)
+  timezone_offset_hours: 5       # время в постах: Узбекистан = UTC+5
   delay_seconds: 3         # пауза между постами в канале
   title_similarity: 0.75   # 0..1, выше = строже склеивает дубли (подкручивать по результатам)
-  min_title_len: 15
+  min_title_len: 15        # для новостей (у соревнований названия бывают короткими)
   max_summary_chars: 350
-  state_days: 30           # сколько дней помнить уже отправленное
+  state_days: 60           # сколько дней помнить уже отправленное
+  title_memory_days: 30    # сколько дней сравнивать новые заголовки со старыми
   link_preview: true       # карточка со ссылкой под постом
 
 # Записи с этими фрагментами (в заголовке или тексте) считаются рекламой
@@ -29,7 +33,7 @@ sources:
   - {name: Proglib,   type: rss, url: "https://proglib.io/feed",                 tag: разработка}
   - {name: vc.ru,     type: rss, url: "https://vc.ru/rss/all",                   tag: технологии}
   # --- Гаджеты и железо ---
-  - {name: 3DNews,      type: rss, url: "https://3dnews.ru/breakingnews/rss/",    tag: железо}
+  - {name: 3DNews,      enabled: false, type: rss, url: "https://3dnews.ru/breakingnews/rss/", tag: железо}  # адрес 404, нужен другой
   - {name: iXBT,        type: rss, url: "https://www.ixbt.com/export/news.rss",   tag: железо}
   - {name: Overclockers, type: rss, url: "https://overclockers.ru/rss/all.rss",   tag: железо}
   - {name: CNews,       type: rss, url: "https://www.cnews.ru/inc/rss/news.xml",  tag: железо}
@@ -37,4 +41,16 @@ sources:
   - {name: N+1,          type: rss, url: "https://nplus1.ru/rss",                 tag: наука}
   - {name: Naked Science, type: rss, url: "https://naked-science.ru/feed",        tag: наука}
   # --- Telegram-каналы (только публичные) ---
-  - {name: CodeCamp, type: telegram, channel: campcode, tag: разработка}
+  - {name: CodeCamp,    type: telegram, channel: campcode,           tag: разработка}
+  - {name: S010lvloon,  type: telegram, channel: S010lvloon_channel, tag: безопасность}
+  - {name: Прогер,      type: telegram, channel: proger3,            tag: разработка}
+  - {name: PrepodSteam, type: telegram, channel: prepodsteam,        tag: игры}
+
+  # === ВОЗМОЖНОСТИ: соревнования, гранты, стипендии (свои лимиты, посты со значком 🎯) ===
+  - {name: CTFtime,    type: ctftime,    kind: opportunity, tag: ctf,       days_ahead: 30}
+  - {name: Codeforces, type: codeforces, kind: opportunity, tag: олимпиады, days_ahead: 14}
+  - {name: Devpost,    type: devpost,    kind: opportunity, tag: хакатоны}
+  - {name: OpportunityDesk,      type: rss, url: "https://opportunitydesk.org/feed/",            kind: opportunity, tag: гранты}
+  - {name: Scholars4Dev,         type: rss, url: "https://www.scholars4dev.com/feed/",            kind: opportunity, tag: стипендии}
+  - {name: ScholarshipPositions, type: rss, url: "https://www.scholarship-positions.com/feed/",   kind: opportunity, tag: стипендии}
+  - {name: EduGrants, type: telegram, channel: edugrandsuz_results, kind: opportunity, tag: гранты}
