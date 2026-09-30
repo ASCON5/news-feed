@@ -72,6 +72,87 @@ def fmt_dt(dt: datetime) -> str:
     return (dt + timedelta(hours=TZ_HOURS)).strftime("%d.%m.%Y %H:%M")
 
 
+RU_MONTHS = {"Jan": "янв", "Feb": "фев", "Mar": "мар", "Apr": "апр", "May": "мая", "Jun": "июн",
+             "Jul": "июл", "Aug": "авг", "Sep": "сен", "Oct": "окт", "Nov": "ноя", "Dec": "дек"}
+DEADLINE = re.compile(r"^Deadline:\s*([A-Za-z]+ \d{1,2}, \d{4})\s*")
+
+
+def ru_dates(text: str) -> str:
+    return re.sub(r"\b(" + "|".join(RU_MONTHS) + r")\b", lambda m: RU_MONTHS[m.group(1)], text)
+
+
+def ru_left(text: str) -> str:
+    m = re.search(r"(about |over |almost )?(\d+)\s+(minute|hour|day|week|month|year)s?", text.lower())
+    if not m:
+        return text
+    unit = {"minute": "мин.", "hour": "ч.", "day": "дн.", "week": "нед.", "month": "мес.", "year": "г."}[m.group(3)]
+    return f"Осталось: {'около ' if m.group(1) else ''}{m.group(2)} {unit}"
+
+
+def split_deadline(summary: str):
+    """'Deadline: October 25, 2026 Текст' -> ('Дедлайн: 25.10.2026\\nТекст', datetime)"""
+    m = DEADLINE.match(summary)
+    if not m:
+        return summary, None
+    try:
+        d = datetime.strptime(m.group(1), "%B %d, %Y").replace(tzinfo=timezone.utc)
+    except ValueError:
+        return summary, None
+    return f"Дедлайн: {d.strftime('%d.%m.%Y')}\n" + summary[m.end():], d
+
+
+def topic_tags(item, topics, limit: int = 2) -> list[str]:
+    blob = f"{item.title} {item.summary}".lower()
+    found = [name for name, pats in (topics or {}).items() if any(re.search(p, blob) for p in pats)]
+    return found[:limit]
+
+
+def clean_img(url) -> str | None:
+    if not url:
+        return None
+    url = str(url).strip()
+    if url.startswith("//"):
+        url = "https:" + url
+    if not url.startswith("http") or re.search(r"\.(svg|gif|ico)(\?|$)", url, re.I):
+        return None
+    return url
+
+
+def set_image(item: Item, src, url) -> None:
+    if src.get("images", True) is not False:
+        item.image = clean_img(url)
+
+
+def rss_image(e) -> str | None:
+    for key in ("media_content", "media_thumbnail"):
+        for m in e.get(key) or []:
+            if m.get("url") and "video" not in str(m.get("type", "")):
+                return m["url"]
+    for enc in e.get("enclosures") or []:
+        if str(enc.get("type", "")).startswith("image") and enc.get("href"):
+            return enc["href"]
+    blobs = [c.get("value", "") for c in e.get("content") or []] + [e.get("summary", "")]
+    for blob in blobs:
+        for img in BeautifulSoup(blob or "", "html.parser").find_all("img"):
+            w = str(img.get("width", "")).strip()
+            if w.isdigit() and int(w) < 100:  # пиксели-счётчики и иконки
+                continue
+            if img.get("src"):
+                return img["src"]
+    return None
+
+
+def tg_image(msg) -> str | None:
+    for sel in (".tgme_widget_message_photo_wrap", ".link_preview_image", ".link_preview_right_image",
+                ".tgme_widget_message_video_thumb"):
+        el = msg.select_one(sel)
+        if el is not None and el.get("style"):
+            m = re.search(r"url\(['\"]?([^'\")]+)", el["style"])
+            if m:
+                return m.group(1)
+    return None
+
+
 # ---------- текст и ссылки ----------
 
 def normalize_url(url: str) -> str:
@@ -115,7 +196,10 @@ class Item:
     published: datetime
     also: list[str] = field(default_factory=list)
     kind: str = "news"  # "news" или "opportunity" (соревнования, гранты: свои лимиты)
-    start: datetime | None = None  # для событий: когда начинается (сортировка «ближайшие первыми»)
+    start: datetime | None = None  # для событий: старт или дедлайн (сортировка «ближайшие первыми»)
+    tags: list[str] = field(default_factory=list)  # теги по теме (если пусто, берётся tag источника)
+    preview: bool = True  # показывать ли карточку-превью ссылки
+    image: str | None = None  # адрес картинки (если есть, пост уходит с фото)
 
     @property
     def key(self) -> str:
@@ -128,7 +212,7 @@ def make_item(src, title, url, summary, published) -> Item:
     if published is None or published > t + timedelta(minutes=5):
         published = t
     return Item(src["name"], src.get("tag", "новости"), title, url, summary, published,
-                kind=src.get("kind", "news"))
+                kind=src.get("kind", "news"), preview=src.get("preview", True))
 
 
 # ---------- получение данных ----------
@@ -161,7 +245,15 @@ def fetch_rss(src) -> list[Item]:
         summary = clean_text(e.get("summary") or e.get("description") or "")
         st = e.get("published_parsed") or e.get("updated_parsed")
         pub = datetime(*st[:6], tzinfo=timezone.utc) if st else None
-        items.append(make_item(src, title, link, summary, pub))
+        deadline = None
+        if src.get("kind") == "opportunity":
+            summary, deadline = split_deadline(summary)
+            if deadline and deadline.date() < now().date():
+                continue  # дедлайн уже прошёл
+        it = make_item(src, title, link, summary, pub)
+        it.start = deadline
+        set_image(it, src, rss_image(e))
+        items.append(it)
     return items
 
 
@@ -192,7 +284,9 @@ def parse_telegram(content: bytes, src) -> list[Item]:
             continue
         time_tag = m.select_one("time[datetime]")
         pub = parse_iso(time_tag["datetime"]) if time_tag else None
-        items.append(make_item(src, tg_title(lines[0]), a["href"], " ".join(lines), pub))
+        it = make_item(src, tg_title(lines[0]), a["href"], " ".join(lines), pub)
+        set_image(it, src, tg_image(m))
+        items.append(it)
     return items
 
 
@@ -216,12 +310,17 @@ def fetch_ctftime(src) -> list[Item]:
         if float(e.get("weight") or 0) < float(src.get("min_weight", 0)):
             continue
         where = f"очно ({e.get('location') or '?'})" if e.get("onsite") else "онлайн"
+        weight = float(e.get("weight") or 0)
+        restr = {"Open": "открытое"}.get(e.get("restrictions"), e.get("restrictions") or "?")
         dates = f"{fmt_dt(start)} — {fmt_dt(end)}" if end else fmt_dt(start)
         lines = [f"Даты: {dates} (UTC+{TZ_HOURS})",
                  f"Формат: {e.get('format') or '?'}, {where}",
-                 f"Вес: {e.get('weight')} · Ограничения: {e.get('restrictions') or '?'}"]
+                 (f"Рейтинг на CTFtime: {weight:g}" if weight > 0 else "Рейтинг на CTFtime: пока нет")
+                 + f" · Участие: {restr}"]
         it = make_item(src, title, link, "\n".join(lines), None)
         it.start = start
+        logo = e.get("logo") or ""
+        set_image(it, src, "https://ctftime.org" + logo if logo.startswith("/") else logo)
         items.append(it)
     return items
 
@@ -241,7 +340,8 @@ def fetch_codeforces(src) -> list[Item]:
         dur = int(c.get("durationSeconds") or 0)
         lines = [f"Старт: {fmt_dt(start)} (UTC+{TZ_HOURS})",
                  f"Длительность: {dur // 3600} ч {dur % 3600 // 60} мин",
-                 f"Формат: {c.get('type', '?')}"]
+                 "Формат: " + {"CF": "обычный раунд", "ICPC": "ICPC", "IOI": "IOI"}.get(
+                     c.get("type"), c.get("type", "?"))]
         it = make_item(src, clean_text(c.get("name", "")), f"https://codeforces.com/contest/{c['id']}",
                        "\n".join(lines), None)
         it.start = start
@@ -264,19 +364,22 @@ def fetch_devpost(src) -> list[Item]:
         if loc and "online" not in loc.lower():  # очные за границей не нужны
             continue
         left = clean_text(h.get("time_left_to_submission", "")).lower()
-        if "hour" in left or "minute" in left:  # до конца меньше суток, поздно
+        if re.search(r"\b(hour|minute)s?\b|\b1 day\b", left):  # до конца сутки или меньше, поздно
             continue
         lines = []
         if h.get("submission_period_dates"):
-            lines.append("Даты: " + clean_text(h["submission_period_dates"]))
-        if h.get("time_left_to_submission"):
-            lines.append(clean_text(h["time_left_to_submission"]))
-        if clean_text(h.get("prize_amount", "")):
-            lines.append("Призы: " + clean_text(h["prize_amount"]))
+            lines.append("Даты: " + ru_dates(clean_text(h["submission_period_dates"])))
+        if left:
+            lines.append(ru_left(left))
+        prize = clean_text(h.get("prize_amount", ""))
+        if re.sub(r"\D", "", prize).strip("0"):  # «$ 0» не показываем
+            lines.append("Призы: " + prize)
         themes = ", ".join(clean_text(x.get("name", "")) for x in h.get("themes") or [] if isinstance(x, dict))
         if themes:
             lines.append("Темы: " + themes)
-        items.append(make_item(src, title, link, "\n".join(lines), None))
+        it = make_item(src, title, link, "\n".join(lines), None)
+        set_image(it, src, h.get("thumbnail_url"))
+        items.append(it)
     return items
 
 
@@ -384,12 +487,12 @@ def format_post(item: Item, max_summary: int = 350) -> str:
     if summary.startswith(base):
         summary = summary[len(base):].lstrip(" .:-—")
     summary = truncate(summary, max_summary)
-    tag = re.sub(r"\W", "_", item.tag)
+    tag_line = " ".join("#" + re.sub(r"\W", "_", t) for t in (item.tags or [item.tag]))
     icon = "🎯 " if item.kind == "opportunity" else ""
     parts = [f"<b>{icon}{html.escape(item.title)}</b>"]
     if summary:
         parts.append(html.escape(summary))
-    foot = f'#{tag} · <a href="{html.escape(item.url, quote=True)}">{html.escape(item.source)}</a>'
+    foot = f'{tag_line} · <a href="{html.escape(item.url, quote=True)}">🔗 {html.escape(item.source)}</a>'
     if item.also:
         foot += "\nТакже: " + ", ".join(html.escape(x) for x in item.also)
     parts.append(foot)
@@ -400,10 +503,8 @@ class TelegramError(Exception):
     pass
 
 
-def send(token: str, chat_id: str, text: str, link_preview: bool = True) -> None:
-    url = f"https://api.telegram.org/bot{token}/sendMessage"
-    payload = {"chat_id": chat_id, "text": text[:4096], "parse_mode": "HTML",
-               "link_preview_options": {"is_disabled": not link_preview}}
+def _call(token: str, method: str, payload: dict, text_key: str) -> None:
+    url = f"https://api.telegram.org/bot{token}/{method}"
     for _ in range(4):
         try:
             r = requests.post(url, json=payload, timeout=30)
@@ -424,10 +525,35 @@ def send(token: str, chat_id: str, text: str, link_preview: bool = True) -> None
             continue
         if r.status_code == 400 and "parse entities" in desc and "parse_mode" in payload:
             payload.pop("parse_mode")
-            payload["text"] = BeautifulSoup(text, "html.parser").get_text()[:4096]
+            payload[text_key] = BeautifulSoup(payload[text_key], "html.parser").get_text()[:4096]
             continue
         raise TelegramError(f"{r.status_code} {desc}")
     raise TelegramError("слишком много повторов")
+
+
+def send(token: str, chat_id: str, text: str, link_preview: bool = True, image: str | None = None) -> None:
+    if image:
+        try:
+            _call(token, "sendPhoto", {"chat_id": chat_id, "photo": image, "caption": text[:1024],
+                                       "parse_mode": "HTML"}, "caption")
+            return
+        except TelegramError as e:
+            if not str(e).startswith("400"):  # сеть, лимиты и прочее не глотаем
+                raise
+            log(f"Фото не прошло ({mask(e)}), отправляю без фото")
+    _call(token, "sendMessage", {"chat_id": chat_id, "text": text[:4096], "parse_mode": "HTML",
+                                 "link_preview_options": {"is_disabled": not link_preview}}, "text")
+
+
+def render(item: Item, s: dict, with_image: bool) -> str:
+    """Подпись к фото ограничена 1024 символами, поэтому при необходимости сокращаем резюме."""
+    limit = 1000 if with_image else 4000
+    text = ""
+    for m in (s["max_summary_chars"], 200, 100, 0):
+        text = format_post(item, m)
+        if len(text) <= limit:
+            return text
+    return text[:limit]
 
 
 # ---------- состояние ----------
@@ -489,12 +615,16 @@ def run(cfg, state, dry, sender) -> int:
     picks = select(items, cfg, state)
     log(f"К публикации: {len(picks)}")
     for it in picks:
-        text = format_post(it, s["max_summary_chars"])
+        if it.kind != "opportunity":
+            it.tags = topic_tags(it, cfg.get("topics"))
+        with_image = bool(it.image) and s.get("images", True)
+        text = render(it, s, with_image)
         if dry:
-            log("-----\n" + BeautifulSoup(text, "html.parser").get_text())
+            log("-----\n" + BeautifulSoup(text, "html.parser").get_text()
+                + (f"\n[фото] {it.image}" if with_image else ""))
             continue
         try:
-            sender(text)
+            sender(text, it.preview, it.image if with_image else None)
         except TelegramError as e:
             log(f"::error::Telegram: {e}")
             finish(state, s)
@@ -521,7 +651,8 @@ def main(argv=None) -> int:
     if not dry and not (token and chat):
         log("::error::Нет TELEGRAM_BOT_TOKEN или TELEGRAM_CHAT_ID (Settings → Secrets → Actions)")
         return 2
-    sender = None if dry else (lambda text: send(token, chat, text, cfg["settings"].get("link_preview", True)))
+    sender = None if dry else (lambda text, preview=True, image=None: send(
+        token, chat, text, preview and cfg["settings"].get("link_preview", True), image))
     return run(cfg, load_state(), dry, sender)
 
 
