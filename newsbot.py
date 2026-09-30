@@ -115,7 +115,7 @@ def clean_img(url) -> str | None:
         url = "https:" + url
     if not url.startswith("http") or re.search(r"\.(svg|gif|ico)(\?|$)", url, re.I):
         return None
-    return url
+    return re.sub(r"(?<!:)/{2,}", "/", url)  # «site.org//media/x.jpg» -> «site.org/media/x.jpg»
 
 
 def set_image(item: Item, src, url) -> None:
