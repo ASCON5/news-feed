@@ -35,6 +35,7 @@ TRACKING = re.compile(r"^(utm_|fbclid$|gclid$|yclid$|ref$)", re.I)
 NUM = re.compile(r"\d+(?:[.,]\d+)*")
 PAUSE = 1.0  # пауза между источниками, чтобы не долбить сайты
 TZ_HOURS = 5  # часовой пояс дат в постах (Узбекистан = UTC+5), задаётся в sources.yml
+TZ_LABEL = "по Ташкенту"
 
 SECRETS: list[str] = []
 
@@ -105,6 +106,85 @@ def topic_tags(item, topics, limit: int = 2) -> list[str]:
     blob = f"{item.title} {item.summary}".lower()
     found = [name for name, pats in (topics or {}).items() if any(re.search(p, blob) for p in pats)]
     return found[:limit]
+
+
+RU_MONTHS_GEN = ("января", "февраля", "марта", "апреля", "мая", "июня", "июля", "августа",
+                 "сентября", "октября", "ноября", "декабря")
+RU_WD = ("пн", "вт", "ср", "чт", "пт", "сб", "вс")
+DATE_RANGE = re.compile(r"([A-Z][a-z]{2}) (\d{1,2})(?:, (\d{4}))? - (?:([A-Z][a-z]{2}) )?(\d{1,2}), (\d{4})")
+
+
+def local(dt: datetime) -> datetime:
+    return dt + timedelta(hours=TZ_HOURS)
+
+
+def fmt_ru(dt: datetime, year: bool = True) -> str:
+    l = local(dt)
+    return f"{RU_WD[l.weekday()]}, {l.day} {RU_MONTHS_GEN[l.month - 1]}{' ' + str(l.year) if year else ''}, {l:%H:%M}"
+
+
+def fmt_range(a: datetime, b: datetime | None = None) -> str:
+    if not b:
+        return f"{fmt_ru(a)} ({TZ_LABEL})"
+    la, lb = local(a), local(b)
+    end = f"{lb:%H:%M}" if la.date() == lb.date() else fmt_ru(b, year=la.year != lb.year)
+    return f"{fmt_ru(a)} — {end} ({TZ_LABEL})"
+
+
+def human_delta(td: timedelta) -> str:
+    secs = int(td.total_seconds())
+    if secs <= 0:
+        return "уже идёт"
+    days, rem = divmod(secs, 86400)
+    hours, rem = divmod(rem, 3600)
+    mins = rem // 60
+    if days:
+        return f"{days} дн. {hours} ч." if hours else f"{days} дн."
+    if hours:
+        return f"{hours} ч. {mins} мин." if mins else f"{hours} ч."
+    return f"{max(mins, 1)} мин."
+
+
+def parse_end_date(text: str):
+    """'Sep 29 - Oct 04, 2026' -> date(2026, 10, 4)"""
+    m = DATE_RANGE.search(text or "")
+    if not m:
+        return None
+    try:
+        return datetime.strptime(f"{m.group(4) or m.group(1)} {m.group(5)} {m.group(6)}", "%b %d %Y").date()
+    except ValueError:
+        return None
+
+
+def ctf_about(fmt: str | None) -> str:
+    f = (fmt or "").lower()
+    base = "Командное соревнование по кибербезопасности (CTF)"
+    if "jeopardy" in f:
+        return base + ": задания по категориям (веб, криптография, реверс, форензика и др.), за каждое решённое начисляются очки."
+    if "attack" in f:
+        return base + ": каждой команде выдают сервер с уязвимыми сервисами. Свой нужно защищать, а серверы соперников атаковать."
+    if "quest" in f:
+        return base + ": задания идут как квест, их нужно проходить по порядку."
+    return base + "."
+
+
+def cf_about(name: str) -> str:
+    n = name.lower()
+    base = ("Соревнование по спортивному программированию на Codeforces: несколько алгоритмических задач "
+            "на скорость, результат идёт в рейтинг.")
+    if "div. 1" in n and "div. 2" in n:
+        who = "Открыт для всех участников."
+    elif "div. 1" in n:
+        who = "Div. 1 обычно для сильных участников (рейтинг от 1900)."
+    elif "div. 2" in n or "educational" in n:
+        who = "Обычно для рейтинга до 2100, подойдёт и новичкам."
+    elif "div. 3" in n:
+        who = "Обычно для рейтинга до 1600, хороший вариант для начала."
+    elif "div. 4" in n:
+        who = "Обычно для рейтинга до 1400, самый лёгкий вариант."
+    else:
+        who = ""
+    return f"{base} {who}".strip()
 
 
 def clean_img(url) -> str | None:
@@ -200,6 +280,7 @@ class Item:
     tags: list[str] = field(default_factory=list)  # теги по теме (если пусто, берётся tag источника)
     preview: bool = True  # показывать ли карточку-превью ссылки
     image: str | None = None  # адрес картинки (если есть, пост уходит с фото)
+    details: dict[str, str] = field(default_factory=dict)  # поля «карточки возможности»
 
     @property
     def key(self) -> str:
@@ -252,6 +333,15 @@ def fetch_rss(src) -> list[Item]:
                 continue  # дедлайн уже прошёл
         it = make_item(src, title, link, summary, pub)
         it.start = deadline
+        if src.get("kind") == "opportunity":
+            det = {"about": summary.split("\n", 1)[1] if deadline else summary}
+            if deadline:
+                days = max((deadline.date() - now().date()).days, 0)
+                det["reg"] = f"подать заявку до {deadline.day} {RU_MONTHS_GEN[deadline.month - 1]} {deadline.year}"
+                det["left"] = "Дедлайн сегодня" if days == 0 else f"Осталось: {days} дн."
+            det["todo"] = ("открой ссылку, проверь по правилам, подходишь ли по возрасту, стране и уровню "
+                           "образования, и подготовь документы заранее")
+            it.details = det
         set_image(it, src, rss_image(e))
         items.append(it)
     return items
@@ -327,6 +417,23 @@ def fetch_ctftime(src) -> list[Item]:
                  + f" · Участие: {restr}"]
         it = make_item(src, title, link, "\n".join(lines), None)
         it.start = start
+        orgs = ", ".join(clean_text(o.get("name", "")) for o in (e.get("organizers") or [])
+                         if isinstance(o, dict) and o.get("name"))
+        who = {"open": "открытое, можно без отбора", "academic": "академическое: для студенческих команд",
+               "prequalified": "нужно пройти отбор", "invite-only": "только по приглашениям"}.get(raw.lower(), raw)
+        it.details = {
+            "about": ctf_about(e.get("format")),
+            "when": fmt_range(start, end),
+            "left": "До старта: " + human_delta(start - now()),
+            "reg": "на странице турнира (срок смотри там, обычно до старта)",
+            "format": f"{e.get('format') or '?'} · {where}",
+            "who": who,
+            "rating": (f"{weight:g} (чем выше, тем престижнее)" if weight > 0
+                       else "пока нет (новый или неоценённый турнир)"),
+            "org": orgs,
+            "need": "команда (её можно найти или создать на CTFtime), ноутбук и интернет",
+            "todo": "зарегистрируйся по ссылке ниже и заранее прочитай правила",
+        }
         logo = e.get("logo") or ""
         set_image(it, src, logo if logo.startswith("http")
                   else ("https://ctftime.org/" + logo.lstrip("/") if logo else None))
@@ -351,9 +458,19 @@ def fetch_codeforces(src) -> list[Item]:
                  f"Длительность: {dur // 3600} ч {dur % 3600 // 60} мин",
                  "Формат: " + {"CF": "обычный раунд", "ICPC": "ICPC", "IOI": "IOI"}.get(
                      c.get("type"), c.get("type", "?"))]
-        it = make_item(src, clean_text(c.get("name", "")), f"https://codeforces.com/contest/{c['id']}",
-                       "\n".join(lines), None)
+        name = clean_text(c.get("name", ""))
+        it = make_item(src, name, f"https://codeforces.com/contest/{c['id']}", "\n".join(lines), None)
         it.start = start
+        kind_ru = {"CF": "обычный раунд", "ICPC": "ICPC", "IOI": "IOI"}.get(c.get("type"), c.get("type", "?"))
+        it.details = {
+            "about": cf_about(name),
+            "when": fmt_range(start, start + timedelta(seconds=dur)),
+            "left": "До старта: " + human_delta(start - now()),
+            "reg": "на странице раунда, лучше зарегистрироваться заранее",
+            "format": f"{kind_ru} · {dur // 3600} ч {dur % 3600 // 60} мин",
+            "need": "бесплатный аккаунт на Codeforces и компьютер; язык на выбор (C++, Python, Java и др.)",
+            "todo": "зарегистрируйся по ссылке ниже и приходи к старту",
+        }
         items.append(it)
     return items
 
@@ -400,6 +517,18 @@ def fetch_devpost(src) -> list[Item]:
         if themes:
             lines.append("Темы: " + themes)
         it = make_item(src, title, link, "\n".join(lines), None)
+        dates_raw = clean_text(h.get("submission_period_dates", ""))
+        end_d = parse_end_date(dates_raw)
+        it.details = {
+            "about": ("Онлайн-хакатон. Темы: " + themes) if themes else "Онлайн-хакатон.",
+            "when": ru_dates(dates_raw),
+            "left": ru_left(left) if left else "",
+            "reg": (f"сдать проект до {end_d.day} {RU_MONTHS_GEN[end_d.month - 1]} {end_d.year}" if end_d else ""),
+            "prize": prize if re.sub(r"\D", "", prize).strip("0") else "",
+            "who": "ограничения по странам и возрасту смотри в правилах хакатона",
+            "need": "аккаунт на Devpost, идея и проект (команда или соло, смотри правила)",
+            "todo": "открой страницу, прочитай правила, нажми Join hackathon и сдай проект до дедлайна",
+        }
         set_image(it, src, h.get("thumbnail_url"))
         items.append(it)
     return items
@@ -503,21 +632,45 @@ def select(items, cfg, state):
 
 # ---------- формат и отправка ----------
 
-def format_post(item: Item, max_summary: int = 350) -> str:
+G1 = (("when", "📅 Когда: "), ("left", "⏳ "), ("reg", "📝 Регистрация: "), ("format", "📍 Формат: "),
+      ("who", "🔓 Участие: "), ("rating", "⭐ Рейтинг: "), ("prize", "🏆 Призы: "), ("org", "🏢 Организаторы: "))
+G2 = (("need", "📎 Что нужно: "), ("todo", "👉 Что делать: "))
+
+
+def footer(item: Item) -> str:
+    tag_line = " ".join("#" + re.sub(r"\W", "_", t) for t in (item.tags or [item.tag]))
+    foot = f'{tag_line} · <a href="{html.escape(item.url, quote=True)}">🔗 {html.escape(item.source)}</a>'
+    if item.also:
+        foot += "\nТакже: " + ", ".join(html.escape(x) for x in item.also)
+    return foot
+
+
+def format_opportunity(item: Item, max_summary: int, drop=()) -> str:
+    d = {k: v for k, v in item.details.items() if v and k not in drop}
+    parts = [f"<b>🎯 {html.escape(item.title)}</b>"]
+    if d.get("about"):
+        parts.append(html.escape(truncate(d["about"], max_summary)))
+    for group in (G1, G2):
+        rows = [f"{label}{html.escape(d[key])}" for key, label in group if key in d]
+        if rows:
+            parts.append("\n".join(rows))
+    parts.append(footer(item))
+    return "\n\n".join(parts)
+
+
+def format_post(item: Item, max_summary: int = 350, drop=()) -> str:
+    if item.kind == "opportunity" and item.details:
+        return format_opportunity(item, max_summary, drop)
     summary = item.summary
     base = item.title.rstrip("…")
     if summary.startswith(base):
         summary = summary[len(base):].lstrip(" .:-—")
     summary = truncate(summary, max_summary)
-    tag_line = " ".join("#" + re.sub(r"\W", "_", t) for t in (item.tags or [item.tag]))
     icon = "🎯 " if item.kind == "opportunity" else ""
     parts = [f"<b>{icon}{html.escape(item.title)}</b>"]
     if summary:
         parts.append(html.escape(summary))
-    foot = f'{tag_line} · <a href="{html.escape(item.url, quote=True)}">🔗 {html.escape(item.source)}</a>'
-    if item.also:
-        foot += "\nТакже: " + ", ".join(html.escape(x) for x in item.also)
-    parts.append(foot)
+    parts.append(footer(item))
     return "\n\n".join(parts)
 
 
@@ -568,11 +721,14 @@ def send(token: str, chat_id: str, text: str, link_preview: bool = True, image: 
 
 
 def render(item: Item, s: dict, with_image: bool) -> str:
-    """Подпись к фото ограничена 1024 символами, поэтому при необходимости сокращаем резюме."""
+    """Подпись к фото ограничена 1024 символами: сокращаем описание и убираем второстепенные строки."""
     limit = 1000 if with_image else 4000
+    base = s["max_summary_chars"]
+    steps = [(base, ()), (base, ("org",)), (200, ("org", "rating")), (120, ("org", "rating", "prize", "need")),
+             (60, ("org", "rating", "prize", "need", "who")), (0, ("org", "rating", "prize", "need", "who"))]
     text = ""
-    for m in (s["max_summary_chars"], 200, 100, 0):
-        text = format_post(item, m)
+    for m, drop in steps:
+        text = format_post(item, m, drop)
         if len(text) <= limit:
             return text
     return text[:limit]
@@ -615,9 +771,10 @@ def finish(state: dict, s: dict) -> None:
 # ---------- запуск ----------
 
 def run(cfg, state, dry, sender) -> int:
-    global TZ_HOURS
+    global TZ_HOURS, TZ_LABEL
     s = cfg["settings"]
     TZ_HOURS = s.get("timezone_offset_hours", 5)
+    TZ_LABEL = s.get("timezone_label", f"UTC+{TZ_HOURS}")
     items, report = collect(cfg)
     log("Источники:")
     for name, r in report.items():
