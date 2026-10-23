@@ -37,6 +37,10 @@ PAUSE = 1.0  # пауза между источниками, чтобы не д�
 TZ_HOURS = 5  # часовой пояс дат в постах (Узбекистан = UTC+5), задаётся в sources.yml
 TZ_LABEL = "по Ташкенту"
 
+# консоль Windows и вывод в файл по умолчанию не в UTF-8, а в постах эмодзи
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
 SECRETS: list[str] = []
 
 
@@ -249,11 +253,54 @@ def norm_title(t: str) -> str:
     return re.sub(r"\s+", " ", t).strip()
 
 
+BLOCK_TAGS = ("p", "div", "li", "h1", "h2", "h3", "h4", "h5", "h6", "blockquote", "figcaption", "tr")
+END_CHARS = ".!?…:;»\")"
+# хвосты анонсов: «— Читать дальше «…»», «[…]», «The post … appeared first on …»
+JUNK = re.compile(r"\s*(—\s*)?Читать (далее|дальше|полностью)\b.*$"
+                  r"|\s*\[(\.\.\.|…)\]\s*$"
+                  r"|\s*(The post|Сообщение) .{0,300}? (appeared first on|появились сначала на) .*$"
+                  r"|\s*(Подробнее|Continue reading)\s*[.…→»]*\s*$", re.I)
+SENTENCE = re.compile(r"(?<=[.!?…])\s+(?=[«\"A-ZА-ЯЁ0-9])")
+
+
 def clean_text(raw) -> str:
+    """HTML -> одна строка. Абзацы и подзаголовки разделяются точкой, чтобы не слипались."""
     if not raw:
         return ""
-    text = BeautifulSoup(str(raw), "html.parser").get_text(" ")
-    return re.sub(r"\s+", " ", html.unescape(text)).strip()
+    soup = BeautifulSoup(str(raw), "html.parser")
+    for br in soup.find_all("br"):
+        br.replace_with("\n")
+    for el in soup.find_all(BLOCK_TAGS):
+        el.append("\n")
+    lines = [re.sub(r"\s+", " ", html.unescape(ln)).strip() for ln in soup.get_text().split("\n")]
+    lines = [ln for ln in lines if ln]
+    return " ".join(ln if ln[-1] in END_CHARS or i == len(lines) - 1 else ln + "."
+                    for i, ln in enumerate(lines))
+
+
+def strip_junk(text: str) -> str:
+    text = JUNK.sub("", text)
+    text = re.sub(r"(?<=[.!?])\s*(…|\.\.\.)$", "", text)  # «Nintendo.…» -> «Nintendo.»
+    return re.sub(r"(?<!\.)\.\.(?!\.)", ".", text).strip()  # «..» -> «.», многоточие не трогаем
+
+
+def lead(text: str, limit: int) -> str:
+    """Первые законченные предложения текста без повторов, не длиннее limit."""
+    out: list[str] = []
+    for s in SENTENCE.split(text):
+        ns = norm_title(s)
+        if any(ns in no or no in ns or difflib.SequenceMatcher(None, ns, no).ratio() >= 0.7
+               for no in map(norm_title, out)):
+            continue  # лид часто повторяется в начале самой статьи
+        if out and len(" ".join(out + [s])) > limit:
+            break
+        out.append(s)
+    if len(out) > 1 and out[-1][-1] not in END_CHARS:
+        out.pop()  # последнее предложение оборвал сам источник
+    res = " ".join(out)
+    if len(res) > limit:
+        return truncate(res, limit)
+    return res if not res or res[-1] in END_CHARS else res + "…"
 
 
 def truncate(text: str, limit: int) -> str:
@@ -281,6 +328,7 @@ class Item:
     preview: bool = True  # показывать ли карточку-превью ссылки
     image: str | None = None  # адрес картинки (если есть, пост уходит с фото)
     details: dict[str, str] = field(default_factory=dict)  # поля «карточки возможности»
+    auto_tags: bool = True  # подбирать теги по теме (topics); иначе только тег источника
 
     @property
     def key(self) -> str:
@@ -293,7 +341,8 @@ def make_item(src, title, url, summary, published) -> Item:
     if published is None or published > t + timedelta(minutes=5):
         published = t
     return Item(src["name"], src.get("tag", "новости"), title, url, summary, published,
-                kind=src.get("kind", "news"), preview=src.get("preview", True))
+                kind=src.get("kind", "news"), preview=src.get("preview", True),
+                auto_tags=src.get("topics", True) is not False)
 
 
 # ---------- получение данных ----------
@@ -320,10 +369,11 @@ def fetch_rss(src) -> list[Item]:
         raise RuntimeError("RSS пустой или не разобрался")
     items = []
     for e in feed.entries:
-        link, title = e.get("link"), clean_text(e.get("title", ""))
+        link = e.get("link")
+        title = re.sub(r"(?<!\.)\.$", "", clean_text(e.get("title", "")))  # точка в конце заголовка лишняя
         if not link or not title:
             continue
-        summary = clean_text(e.get("summary") or e.get("description") or "")
+        summary = strip_junk(clean_text(e.get("summary") or e.get("description") or ""))
         st = e.get("published_parsed") or e.get("updated_parsed")
         pub = datetime(*st[:6], tzinfo=timezone.utc) if st else None
         deadline = None
@@ -581,6 +631,29 @@ def sort_key(i: Item):
     return i.start or i.published
 
 
+def pick_news(items, limit, last_sent, caps):
+    """По одной записи из каждого источника по кругу. Первыми идут источники, которые дольше всех
+    не попадали в канал, чтобы редкие не тонули среди частых. caps: {тег источника: сколько ещё можно}."""
+    groups: dict[str, list[Item]] = {}
+    for it in sorted(items, key=lambda i: i.published, reverse=True):
+        groups.setdefault(it.source, []).append(it)
+    order = sorted(groups, key=lambda src: last_sent.get(src, ""))  # ISO-строки сравниваются как даты
+    left = dict(caps)
+    out: list[Item] = []
+    while len(out) < limit and any(groups.values()):
+        for src in order:
+            if not groups[src] or len(out) >= limit:
+                continue
+            it = groups[src].pop(0)
+            if it.tag in left:
+                if left[it.tag] <= 0:
+                    groups[src].clear()
+                    continue
+                left[it.tag] -= 1
+            out.append(it)
+    return out
+
+
 def round_robin(items, limit, key=lambda i: i.published, reverse=True):
     groups: dict[str, list[Item]] = {}
     for it in sorted(items, key=key, reverse=reverse):
@@ -625,7 +698,11 @@ def select(items, cfg, state):
     n_lim = budget(state, "sent_log", s["max_posts_per_run"], s["max_posts_per_day"], t)
     o_lim = budget(state, "sent_log_opp", s.get("max_opportunities_per_run", 5),
                    s.get("max_opportunities_per_day", 12), t)
-    picks = sorted(round_robin(news, n_lim), key=lambda i: i.published)
+    day_ago = t - timedelta(hours=24)
+    caps = {tag: max(0, n - sum(1 for x in state.get("sent_tags", [])
+                                if x["tag"] == tag and (parse_iso(x["ts"]) or t) >= day_ago))
+            for tag, n in (s.get("tag_limits_per_day") or {}).items()}
+    picks = sorted(pick_news(news, n_lim, state.get("last_by_source", {}), caps), key=lambda i: i.published)
     picks += sorted(round_robin(opps, o_lim, key=sort_key, reverse=False), key=sort_key)
     return picks
 
@@ -639,9 +716,9 @@ G2 = (("need", "📎 Что нужно: "), ("todo", "👉 Что делать: 
 
 def footer(item: Item) -> str:
     tag_line = " ".join("#" + re.sub(r"\W", "_", t) for t in (item.tags or [item.tag]))
-    foot = f'{tag_line} · <a href="{html.escape(item.url, quote=True)}">🔗 {html.escape(item.source)}</a>'
+    foot = f'{tag_line}\n🔗 <a href="{html.escape(item.url, quote=True)}">Читать полностью</a> · {html.escape(item.source)}'
     if item.also:
-        foot += "\nТакже: " + ", ".join(html.escape(x) for x in item.also)
+        foot += "\nТакже писали: " + ", ".join(html.escape(x) for x in item.also)
     return foot
 
 
@@ -665,7 +742,7 @@ def format_post(item: Item, max_summary: int = 350, drop=()) -> str:
     base = item.title.rstrip("…")
     if summary.startswith(base):
         summary = summary[len(base):].lstrip(" .:-—")
-    summary = truncate(summary, max_summary)
+    summary = lead(summary, max_summary)
     icon = "🎯 " if item.kind == "opportunity" else ""
     parts = [f"<b>{icon}{html.escape(item.title)}</b>"]
     if summary:
@@ -737,7 +814,8 @@ def render(item: Item, s: dict, with_image: bool) -> str:
 # ---------- состояние ----------
 
 def load_state() -> dict:
-    base = {"initialized": False, "seen": {}, "titles": [], "sent_log": [], "sent_log_opp": [], "last_run": ""}
+    base = {"initialized": False, "seen": {}, "titles": [], "sent_log": [], "sent_log_opp": [], "last_run": "",
+            "last_by_source": {}, "sent_tags": []}
     if STATE_PATH.exists():
         base.update(json.loads(STATE_PATH.read_text(encoding="utf-8")))
     return base
@@ -764,6 +842,8 @@ def finish(state: dict, s: dict) -> None:
     state["titles"] = [x for x in state["titles"] if (parse_iso(x["ts"]) or t) >= old_titles]
     for k in ("sent_log", "sent_log_opp"):
         state[k] = [x for x in state.get(k, []) if (parse_iso(x) or t) >= t - timedelta(days=2)]
+    state["sent_tags"] = [x for x in state.get("sent_tags", []) if (parse_iso(x["ts"]) or t) >= t - timedelta(days=2)]
+    state["last_by_source"] = {k: v for k, v in state.get("last_by_source", {}).items() if (parse_iso(v) or t) >= old}
     state["last_run"] = t.strftime("%Y-%m-%d")  # раз в сутки: поддерживает активность репозитория
     save_state(state)
 
@@ -794,7 +874,7 @@ def run(cfg, state, dry, sender) -> int:
     picks = select(items, cfg, state)
     log(f"К публикации: {len(picks)}")
     for it in picks:
-        if it.kind != "opportunity":
+        if it.kind != "opportunity" and it.auto_tags:
             it.tags = topic_tags(it, cfg.get("topics"))
         with_image = bool(it.image) and s.get("images", True)
         text = render(it, s, with_image)
@@ -809,7 +889,10 @@ def run(cfg, state, dry, sender) -> int:
             finish(state, s)
             return 1
         mark_seen(state, it)  # сразу после отправки, чтобы сбой дальше не вызвал дубль
-        state["sent_log_opp" if it.kind == "opportunity" else "sent_log"].append(iso(now()))
+        ts = iso(now())
+        state["sent_log_opp" if it.kind == "opportunity" else "sent_log"].append(ts)
+        state.setdefault("last_by_source", {})[it.source] = ts
+        state.setdefault("sent_tags", []).append({"tag": it.tag, "ts": ts})
         save_state(state)
         time.sleep(s["delay_seconds"])
     if not dry:

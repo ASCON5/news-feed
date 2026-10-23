@@ -2,7 +2,9 @@ name: news
 
 on:
   schedule:
-    - cron: "17 2,5,8,11,14,17 * * *"
+    # каждый час с 06:17 до 23:17 по Ташкенту; GitHub часть запусков пропускает,
+    # поэтому их с запасом, а лишнее срезает max_posts_per_day
+    - cron: "17 1-18 * * *"
   workflow_dispatch:
     inputs:
       dry_run:
@@ -11,7 +13,8 @@ on:
         default: true
 
 permissions:
-  contents: write
+  contents: write  # память бота сохраняется в ветку state
+  actions: write   # шаг Keepalive
 
 concurrency:
   group: news
@@ -28,16 +31,43 @@ jobs:
           python-version: "3.12"
           cache: pip
       - run: pip install -r requirements.txt
+      - name: Load state
+        # память бота живёт в отдельной ветке state, чтобы её коммиты не засоряли историю main
+        run: |
+          mkdir -p data
+          if git fetch -q --depth=1 origin state:state; then
+            git show state:state.json > data/state.json
+          else
+            echo "Ветки state ещё нет, беру data/state.json из main, если он есть"
+          fi
       - name: Run
+        id: bot
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || 'false' }}
         run: python newsbot.py
       - name: Save state
-        if: always()
+        # и после сбоя: что уже отправлено, должно запомниться, иначе будут дубли
+        if: always() && steps.bot.outcome != 'skipped'
         run: |
-          git config user.name "newsbot"
-          git config user.email "newsbot@users.noreply.github.com"
-          git add data/state.json
-          git diff --cached --quiet || (git commit -m "state" && git pull --rebase && git push)
+          [ -f data/state.json ] || exit 0
+          git config --global user.name "newsbot"
+          git config --global user.email "newsbot@users.noreply.github.com"
+          if ! git rev-parse -q --verify state >/dev/null; then
+            git branch state "$(git commit-tree "$(git mktree </dev/null)" -m "state: начало")"
+          fi
+          git worktree add -q "$RUNNER_TEMP/state" state
+          cp data/state.json "$RUNNER_TEMP/state/state.json"
+          cd "$RUNNER_TEMP/state"
+          git add state.json
+          git diff --cached --quiet || (git commit -qm state && git push -q origin state)
+      - name: Keepalive
+        # GitHub выключает расписание в публичном репозитории после 60 дней без активности.
+        # Считаются ли коммиты в ветку state, GitHub не уточняет, поэтому расписание
+        # подтверждается через API (так же работает keepalive-workflow).
+        if: github.event_name == 'schedule'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh api -X PUT "repos/${{ github.repository }}/actions/workflows/news.yml/enable"
