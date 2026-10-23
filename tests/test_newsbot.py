@@ -654,5 +654,72 @@ class Rotation(unittest.TestCase):
         self.assertEqual(sum(p.tag == "мир" for p in picks), 1)
 
 
+BBC_OREL = "Война в Украине: ракетный удар по заводу в Орле; российские удары по Харькову и Днепру"
+DW_OREL = 'В Орле под ракетный удар попал завод "Протон", выпускающий оптоэлектронику для военной промышленности'
+
+
+class Stories(unittest.TestCase):
+    corpus = [BBC_OREL, DW_OREL,
+              "Во Франции вирус Шамонда впервые обнаружен у человека",
+              "ИИ впервые вырастил вирус: его уже ввели человеку",
+              "Человеку впервые пересадили сердце свиньи",
+              "Учёные впервые сфотографировали чёрную дыру",
+              "Компания впервые показала робота-курьера",
+              "Каждый третий человек в мире пользуется ИИ",
+              "Человек на Луне: NASA перенесла миссию",
+              "Вирус гриппа мутировал быстрее, чем ожидали"]
+    cfg = {"settings": dict(max_age_hours=12, min_title_len=5, title_similarity=0.75, max_posts_per_run=5,
+                            max_posts_per_day=30), "ad_words": []}
+
+    def same(self, a, b):
+        return nb.same_story(nb.title_terms(a), nb.title_terms(b), nb.story_idf(self.corpus))
+
+    def test_differently_worded_same_story(self):
+        self.assertTrue(self.same(BBC_OREL, DW_OREL))
+        self.assertTrue(self.same("В Capcom утечка данных — затронуты больше 11 миллионов аккаунтов",
+                                  "Capcom подтвердила взлом: утекли данные 11,7 млн аккаунтов"))
+
+    def test_common_words_alone_are_not_a_story(self):
+        # общие «вирус», «впервые», «человек», но разные события и нет общего имени
+        self.assertFalse(self.same(self.corpus[2], self.corpus[3]))
+
+    def batch(self, t, *fresh):
+        """Свежие записи плюс старые (старше max_age): старые не публикуются, но, как в жизни,
+        входят в общий набор заголовков, по которому считается, какие слова редкие."""
+        old = [nb.Item("Архив", "x", title, f"https://old.ru/{n}", "", t - timedelta(hours=20))
+               for n, title in enumerate(self.corpus[2:])]
+        return list(fresh) + old
+
+    def test_select_merges_story_into_one_post(self):
+        t = nb.now()
+        items = self.batch(t, nb.Item("DW", "мир", DW_OREL, "https://dw.com/1", "", t - timedelta(minutes=30)),
+                           nb.Item("BBC", "мир", BBC_OREL, "https://bbc.com/1", "", t),
+                           nb.Item("Хабр", "IT", "Вышел Python 3.15 с новым сборщиком мусора", "https://habr.com/1", "", t))
+        state = {"seen": {}, "titles": [], "sent_log": [], "sent_log_opp": []}
+        picks = nb.select(items, self.cfg, state)
+        self.assertEqual([p.source for p in picks], ["DW", "Хабр"])
+        self.assertEqual(picks[0].also, ["BBC"])
+
+    def test_story_already_in_channel_is_skipped(self):
+        t = nb.now()
+        state = {"seen": {}, "sent_log": [], "sent_log_opp": [],
+                 "titles": [{"t": nb.norm_title(DW_OREL), "o": DW_OREL, "s": "DW", "ts": nb.iso(t - timedelta(hours=2))}]}
+        items = self.batch(t, nb.Item("BBC", "мир", BBC_OREL, "https://bbc.com/1", "", t),
+                           nb.Item("Хабр", "IT", "Вышел Python 3.15 с новым сборщиком мусора", "https://habr.com/1", "", t))
+        self.assertEqual([p.source for p in nb.select(items, self.cfg, state)], ["Хабр"])
+
+    def test_same_source_titles_are_not_merged(self):
+        t = nb.now()
+        items = [nb.Item("N", "x", f"Длинная новость номер {i} про {w}", f"https://n.ru/{i}", "", t)
+                 for i, w in enumerate(["кошек", "ракеты", "вино"])]
+        state = {"seen": {}, "titles": [], "sent_log": [], "sent_log_opp": []}
+        self.assertEqual(len(nb.select(items, self.cfg, state)), 3)
+
+    def test_mark_seen_keeps_original_title_and_source(self):
+        state = {"seen": {}, "titles": []}
+        nb.mark_seen(state, nb.Item("DW", "мир", DW_OREL, "https://dw.com/1", "", nb.now()))
+        self.assertEqual((state["titles"][0]["o"], state["titles"][0]["s"]), (DW_OREL, "DW"))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

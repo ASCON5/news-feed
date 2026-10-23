@@ -12,6 +12,7 @@ import difflib
 import hashlib
 import html
 import json
+import math
 import os
 import re
 import sys
@@ -621,6 +622,57 @@ def similar(a: str, b: str, thr: float) -> bool:
     return difflib.SequenceMatcher(None, a, b).ratio() >= thr
 
 
+# Одна история из разных источников: заголовки пишут по-разному, поэтому сравниваются основы слов,
+# а редкие слова весят больше частых (TF-IDF). Пороги подобраны на ~560 реальных заголовках.
+STOP_WORDS = frozenset("""
+и в во не что он на я с со как а то все она так его но да ты к у же вы за бы по только ее мне было вот от меня
+еще нет о из ему теперь когда даже ну вдруг ли если уже или ни быть был него до вас нибудь опять уж вам ведь там
+потом себя ничего ей может они тут где есть надо ней для мы тебя их чем была сам чтоб без будто чего раз тоже себе
+под будет ж тогда кто этот того потому этого какой совсем ним здесь этом один почти мой тем чтобы нее сейчас были
+куда зачем всех никогда можно при наконец два об другой хоть после над больше тот через эти нас про всего них
+какая много разве три эту моя впрочем хорошо свою этой перед иногда лучше чуть том нельзя такой им более всегда
+конечно всю между это также стал стала стали новый новая новое новые новой новую который которая которые году
+года лет время the and for with from new pro max ultra plus mini""".split())
+RU_ENDING = re.compile(r"(иями|ями|ами|ого|его|ому|ему|ыми|ими|ешь|ете|ишь|ите|ая|яя|ое|ее|ой|ей|ий|ый|ые|ие|ую|"
+                       r"юю|ом|ем|ам|ям|ах|ях|ых|их|ов|ев|ию|ия|ь|у|ю|а|я|о|е|ы|и)$")
+STORY_STRONG = 0.5  # такое сходство — одна история и без общих имён
+STORY_NAMED = 0.33  # при общем имени (Орёл, Capcom, PHP) и хотя бы трёх общих словах
+
+
+def title_terms(title: str) -> tuple[set[str], set[str]]:
+    """Основы слов заголовка и отдельно основы имён: слова с большой буквы не в начале и латиница."""
+    terms: set[str] = set()
+    names: set[str] = set()
+    for n, w in enumerate(re.findall(r"[A-Za-zА-Яа-яЁё0-9]+", title)):
+        low = w.lower().replace("ё", "е")
+        if low in STOP_WORDS or len(low) < 3:
+            continue
+        stem = low if low.isascii() else RU_ENDING.sub("", low)
+        stem = stem if len(stem) >= 3 else low
+        terms.add(stem)
+        if (low.isascii() and not low.isdigit()) or (n > 0 and w[0].isupper() and not w.isupper()):
+            names.add(stem)  # аббревиатуры вроде ИИ и США не имена: они есть в половине новостей
+    return terms, names
+
+
+def story_idf(titles) -> dict[str, float]:
+    df: dict[str, int] = {}
+    for title in titles:
+        for s in title_terms(title)[0]:
+            df[s] = df.get(s, 0) + 1
+    return {s: math.log((len(titles) + 1) / (c + 1)) + 1 for s, c in df.items()}
+
+
+def same_story(a, b, idf) -> bool:
+    (ta, na), (tb, nb) = a, b
+    common = ta & tb
+    if not common:
+        return False
+    w = lambda terms: sum(idf.get(s, 1.0) ** 2 for s in terms)  # noqa: E731
+    score = w(common) / math.sqrt(w(ta) * w(tb))
+    return score >= STORY_STRONG or (score >= STORY_NAMED and bool(na & nb) and len(common) >= 3)
+
+
 def budget(state, key, per_run, per_day, t):
     day_ago = t - timedelta(hours=24)
     sent = sum(1 for x in state.get(key, []) if (parse_iso(x) or t) >= day_ago)
@@ -679,19 +731,31 @@ def select(items, cfg, state):
 
     thr = s["title_similarity"]
     known = [x["t"] for x in state["titles"]]
+    # Та же история из другого источника: среди уже вышедших за сутки и среди отобранных сейчас.
+    # Внутри одного источника не сравниваем: у него похожие заголовки бывают у разных новостей.
+    # У старых записей нет исходного заголовка «o» (только «t» без заглавных букв) и источника «s».
+    recent = [(x.get("o", x["t"]), x.get("s")) for x in state["titles"]
+              if (parse_iso(x["ts"]) or t) >= t - timedelta(hours=24)]
+    idf = story_idf([i.title for i in items] + [r for r, _ in recent])
+    recent_terms = [(title_terms(r), src) for r, src in recent]
     kept: list[Item] = []
+    kept_terms: list = []
     for it in fresh:
         nt = norm_title(it.title)
+        terms = title_terms(it.title)
         if any(k.key == it.key for k in kept):
             continue
-        if any(similar(nt, k, thr) for k in known):
+        if any(similar(nt, k, thr) for k in known) or any(
+                src != it.source and same_story(terms, rt, idf) for rt, src in recent_terms):
             continue
-        twin = next((k for k in kept if similar(nt, norm_title(k.title), thr)), None)
+        twin = next((k for k, kt in zip(kept, kept_terms) if similar(nt, norm_title(k.title), thr)
+                     or (k.source != it.source and same_story(terms, kt, idf))), None)
         if twin:
             if it.source != twin.source and it.source not in twin.also:
                 twin.also.append(it.source)
             continue
         kept.append(it)
+        kept_terms.append(terms)
 
     news = [i for i in kept if i.kind != "opportunity"]
     opps = [i for i in kept if i.kind == "opportunity"]
@@ -831,7 +895,7 @@ def save_state(state: dict) -> None:
 def mark_seen(state: dict, item: Item) -> None:
     ts = iso(now())
     state["seen"][item.key] = ts
-    state["titles"].append({"t": norm_title(item.title), "ts": ts})
+    state["titles"].append({"t": norm_title(item.title), "o": item.title, "s": item.source, "ts": ts})
 
 
 def finish(state: dict, s: dict) -> None:
