@@ -56,7 +56,7 @@ class Units(unittest.TestCase):
         self.assertIn("&lt;b&gt;", text)
         self.assertIn("&amp;b=2", text)
         self.assertEqual(text.count("новость"), 1 + 0)  # заголовок не повторяется в резюме
-        self.assertIn("Также: Другой", text)
+        self.assertIn("Также писали: Другой", text)
         self.assertLess(len(text), 4096)
 
     def test_parse_telegram(self):
@@ -65,6 +65,16 @@ class Units(unittest.TestCase):
         self.assertEqual(len(items), 1)
         self.assertEqual(items[0].title, "Заголовок поста")
         self.assertEqual(items[0].url, "https://t.me/campcode/1")
+
+    def test_telegram_long_first_sentence_not_cut_midword(self):
+        first = ("Приоритизацию задач теперь можно доверить мухе: команда взяла схему нервной системы "
+                 "дрозофилы и поручила ей самое сложное, решать, с чего начать день.")
+        body = first + " Сервис работает проще пареной репы."
+        items = nb.parse_telegram(tg([(body, nb.now())]), {"name": "CC", "tag": "x"})
+        self.assertEqual(items[0].title, first)
+        text = nb.format_post(items[0])
+        self.assertNotIn("…", text.split("\n")[0])
+        self.assertIn("Сервис работает", text)
 
     def test_parse_telegram_broken_layout_is_loud(self):
         with self.assertRaises(RuntimeError):
@@ -157,7 +167,7 @@ class EndToEnd(unittest.TestCase):
             return orig[url]
 
         with mock.patch.object(nb, "http_get", getter):
-            return nb.run(self.cfg, nb.load_state(), dry, self.sent.append)
+            return nb.run(self.cfg, nb.load_state(), dry, lambda text, p=True, img=None: self.sent.append(text))
 
     def test_full_flow(self):
         t = nb.now()
@@ -179,7 +189,7 @@ class EndToEnd(unittest.TestCase):
         self.assertEqual(self.go(), 0)
         self.assertEqual(len(self.sent), 1)
         self.assertIn("Claude 5", self.sent[0])
-        self.assertIn("Также: B", self.sent[0])
+        self.assertIn("Также писали: B", self.sent[0])
 
         # 3) повторный запуск с теми же данными ничего не шлёт
         self.assertEqual(self.go(), 0)
@@ -209,7 +219,7 @@ class EndToEnd(unittest.TestCase):
         self.go()
         self.set_pages([("Новость которая не отправится", "https://a.ru/x", "", t)], [], [("Пост чтобы инициализироваться", t - timedelta(hours=3))])
 
-        def boom(_):
+        def boom(*_):
             raise nb.TelegramError("500")
         state = nb.load_state()
 
@@ -220,6 +230,428 @@ class EndToEnd(unittest.TestCase):
         with mock.patch.object(nb, "http_get", getter):
             self.assertEqual(nb.run(self.cfg, state, False, boom), 1)
         self.assertEqual(len(nb.load_state()["seen"]), 1)  # только инициализационный пост
+
+
+import json  # noqa: E402
+
+
+class Opportunities(unittest.TestCase):
+    def fake(self, payload):
+        return mock.patch.object(nb, "http_get", lambda url, **k: json.dumps(payload).encode())
+
+    def test_ctftime(self):
+        t = nb.now()
+        payload = [{"title": "DiceCTF 2026", "ctftime_url": "https://ctftime.org/event/1", "url": "https://dice.ctf",
+                    "start": (t + timedelta(days=3)).isoformat(), "finish": (t + timedelta(days=5)).isoformat(),
+                    "format": "Jeopardy", "onsite": False, "location": "", "restrictions": "Open", "weight": 24.5}]
+        with self.fake(payload):
+            items = nb.fetch_ctftime({"name": "CTFtime", "tag": "ctf", "kind": "opportunity"})
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0].kind, "opportunity")
+        self.assertIsNotNone(items[0].start)
+        self.assertIn("Jeopardy", items[0].summary)
+        self.assertIn("онлайн", items[0].summary)
+
+    def test_ctftime_bad_response_is_loud(self):
+        with self.fake({"error": "x"}):
+            with self.assertRaises(RuntimeError):
+                nb.fetch_ctftime({"name": "CTFtime"})
+
+    def test_codeforces_only_upcoming(self):
+        t = nb.now()
+        payload = {"status": "OK", "result": [
+            {"id": 2001, "name": "Codeforces Round 1051 (Div. 2)", "type": "CF", "phase": "BEFORE",
+             "durationSeconds": 7200, "startTimeSeconds": int((t + timedelta(days=2)).timestamp())},
+            {"id": 2002, "name": "Far away round", "type": "CF", "phase": "BEFORE",
+             "durationSeconds": 7200, "startTimeSeconds": int((t + timedelta(days=90)).timestamp())},
+            {"id": 1, "name": "Old", "type": "CF", "phase": "FINISHED", "startTimeSeconds": 1000}]}
+        with self.fake(payload):
+            items = nb.fetch_codeforces({"name": "Codeforces", "kind": "opportunity", "days_ahead": 14})
+        self.assertEqual([i.url for i in items], ["https://codeforces.com/contest/2001"])
+        self.assertIn("2 ч 0 мин", items[0].summary)
+
+    def test_devpost_online_only(self):
+        payload = {"hackathons": [
+            {"title": "AI Hack", "url": "https://ai.devpost.com/", "displayed_location": {"location": "Online"},
+             "submission_period_dates": "Oct 01 - 29, 2026", "prize_amount": "$<span>25,000</span>",
+             "themes": [{"name": "AI"}]},
+            {"title": "Paris Hack", "url": "https://p.devpost.com/", "displayed_location": {"location": "Paris, France"}},
+            {"title": "Almost Over", "url": "https://o.devpost.com/", "displayed_location": {"location": "Online"},
+             "time_left_to_submission": "about 3 hours left"}]}
+        with self.fake(payload):
+            items = nb.fetch_devpost({"name": "Devpost", "kind": "opportunity"})
+        self.assertEqual([i.title for i in items], ["AI Hack"])
+        self.assertIn("25,000", items[0].summary)
+
+    def test_separate_caps_short_titles_soonest_first(self):
+        t = nb.now()
+        cfg = {"settings": dict(max_age_hours=24, min_title_len=15, title_similarity=0.75,
+                                max_posts_per_run=5, max_posts_per_day=20,
+                                max_opportunities_per_run=2, max_opportunities_per_day=12), "ad_words": []}
+        state = {"seen": {}, "titles": [], "sent_log": [], "sent_log_opp": []}
+        items = [nb.Item("N", "x", f"Длинная новость номер {i} про {w}", f"https://n.ru/{i}", "", t)
+                 for i, w in enumerate(["кошек", "ракеты", "вино"])]
+        items += [nb.Item("CTF", "ctf", name, f"https://c.ru/{i}", "", t, kind="opportunity",
+                          start=t + timedelta(days=d))
+                  for i, (name, d) in enumerate([("Alpha Cup", 9), ("DiceCTF 2026", 3), ("Gamma Quest", 5)])]
+        picks = nb.select(items, cfg, state)
+        opps = [p for p in picks if p.kind == "opportunity"]
+        self.assertEqual([p.title for p in opps], ["DiceCTF 2026", "Gamma Quest"])  # ближайшие, короткое имя прошло
+        self.assertEqual(len([p for p in picks if p.kind == "news"]), 3)  # новости не вытеснены
+
+    def test_opportunity_format_has_icon(self):
+        it = nb.Item("CTFtime", "ctf", "DiceCTF 2026", "https://ctftime.org/event/1", "Даты: 1\nФормат: Jeopardy",
+                     nb.now(), kind="opportunity")
+        text = nb.format_post(it)
+        self.assertIn("🎯 DiceCTF 2026", text)
+        self.assertIn("#ctf", text)
+        self.assertIn("Формат: Jeopardy", text)
+
+
+class Polish(unittest.TestCase):
+    def test_topic_tags(self):
+        topics = {"ИИ": [r"anthropic", r"\bии\b"], "разработка": [r"\bgo\b", r"\bphp\b"], "игры": [r"steam"]}
+        mk = lambda title, summ="": nb.Item("s", "железо", title, "https://a.ru/1", summ, nb.now())  # noqa: E731
+        self.assertEqual(nb.topic_tags(mk("Anthropic собираются на IPO"), topics), ["ИИ"])
+        self.assertEqual(nb.topic_tags(mk("Go-версия платформы быстрее PHP-аналога"), topics), ["разработка"])
+        self.assertEqual(nb.topic_tags(mk("Термос от Xiaomi"), topics), [])  # тогда берётся тег источника
+
+    def test_tags_in_post(self):
+        it = nb.Item("Src", "железо", "Заголовок", "https://a.ru/1", "", nb.now(), tags=["ИИ", "безопасность"])
+        self.assertIn("#ИИ #безопасность", nb.format_post(it))
+        it.tags = []
+        self.assertIn("#железо", nb.format_post(it))
+
+    def test_ru_helpers(self):
+        self.assertEqual(nb.ru_dates("Sep 15 - 30, 2026"), "сен 15 - 30, 2026")
+        self.assertEqual(nb.ru_left("about 3 months left"), "Осталось: около 3 мес.")
+        self.assertEqual(nb.ru_left("5 days left"), "Осталось: 5 дн.")
+
+    def test_split_deadline(self):
+        text, d = nb.split_deadline("Deadline: October 25, 2026 Applications are open.")
+        self.assertEqual(text, "Дедлайн: 25.10.2026\nApplications are open.")
+        self.assertEqual((d.year, d.month, d.day), (2026, 10, 25))
+        self.assertEqual(nb.split_deadline("Без дедлайна"), ("Без дедлайна", None))
+
+    def test_rss_opportunity_expired_deadline_skipped(self):
+        t = nb.now()
+        xml = rss([("Старая стипендия 2019", "https://g.org/old", "Deadline: January 05, 2020 Apply now", t),
+                   ("Новая стипендия 2099", "https://g.org/new", "Deadline: December 31, 2099 Apply now", t)])
+        with mock.patch.object(nb, "http_get", lambda url, **k: xml):
+            items = nb.fetch_rss({"name": "G", "tag": "гранты", "kind": "opportunity", "url": "x"})
+        self.assertEqual([i.title for i in items], ["Новая стипендия 2099"])
+        self.assertIn("Дедлайн: 31.12.2099", items[0].summary)
+        self.assertEqual(items[0].start.year, 2099)
+
+    def test_devpost_cleanup(self):
+        payload = {"hackathons": [
+            {"title": "Zero Prize", "url": "https://z.devpost.com/", "displayed_location": {"location": "Online"},
+             "submission_period_dates": "Sep 15 - Oct 30, 2026", "time_left_to_submission": "about 1 month left",
+             "prize_amount": "$ <span>0</span>"},
+            {"title": "Last Day", "url": "https://l.devpost.com/", "displayed_location": {"location": "Online"},
+             "time_left_to_submission": "1 day left"}]}
+        with mock.patch.object(nb, "http_get", lambda url, **k: json.dumps(payload).encode()):
+            items = nb.fetch_devpost({"name": "Devpost", "kind": "opportunity"})
+        self.assertEqual([i.title for i in items], ["Zero Prize"])
+        self.assertIn("сен 15 - окт 30, 2026", items[0].summary)
+        self.assertIn("Осталось: около 1 мес.", items[0].summary)
+        self.assertNotIn("Призы", items[0].summary)
+
+    def test_ctftime_no_rating_text(self):
+        t = nb.now()
+        payload = [{"title": "NewCTF", "ctftime_url": "https://ctftime.org/event/2", "start": (t + timedelta(days=1)).isoformat(),
+                    "finish": (t + timedelta(days=2)).isoformat(), "format": "Jeopardy", "onsite": False,
+                    "restrictions": "Open", "weight": 0.0}]
+        with mock.patch.object(nb, "http_get", lambda url, **k: json.dumps(payload).encode()):
+            items = nb.fetch_ctftime({"name": "CTFtime", "kind": "opportunity", "preview": False})
+        self.assertIn("пока нет", items[0].summary)
+        self.assertIn("открытое", items[0].summary)
+        self.assertFalse(items[0].preview)
+
+
+class Photos(unittest.TestCase):
+    def test_rss_image_sources(self):
+        import feedparser
+        xml = """<?xml version="1.0"?><rss version="2.0" xmlns:media="http://search.yahoo.com/mrss/"><channel><title>x</title>
+        <item><title>A</title><link>https://a.ru/1</link><media:content url="https://img.ru/a.jpg" medium="image"/></item>
+        <item><title>B</title><link>https://a.ru/2</link><enclosure url="https://img.ru/b.png" type="image/png" length="1"/></item>
+        <item><title>C</title><link>https://a.ru/3</link><description><![CDATA[<img src="https://t.ru/px.gif" width="1"><img src="//img.ru/c.webp"> текст]]></description></item>
+        <item><title>D</title><link>https://a.ru/4</link><description>без картинки</description></item>
+        </channel></rss>"""
+        es = feedparser.parse(xml).entries
+        self.assertEqual(nb.clean_img(nb.rss_image(es[0])), "https://img.ru/a.jpg")
+        self.assertEqual(nb.clean_img(nb.rss_image(es[1])), "https://img.ru/b.png")
+        self.assertEqual(nb.clean_img(nb.rss_image(es[2])), "https://img.ru/c.webp")  # пиксель пропущен
+        self.assertIsNone(nb.rss_image(es[3]))
+
+    def test_clean_img(self):
+        self.assertIsNone(nb.clean_img("https://x.ru/logo.svg"))
+        self.assertIsNone(nb.clean_img("/relative.png"))
+        self.assertEqual(nb.clean_img("//x.ru/a.jpg"), "https://x.ru/a.jpg")
+        self.assertEqual(nb.clean_img("https://ctftime.org//media/events/a_1.jpg"),
+                         "https://ctftime.org/media/events/a_1.jpg")
+        self.assertEqual(nb.clean_img("https://x.ru/a//b.jpg?u=http://y.ru/z"), "https://x.ru/a/b.jpg?u=http://y.ru/z")
+
+    def test_telegram_photo(self):
+        html_ = ('<div class="tgme_widget_message"><a class="tgme_widget_message_photo_wrap" '
+                 "style=\"width:100px;background-image:url('https://cdn.tg/p.jpg')\"></a>"
+                 '<div class="tgme_widget_message_text">Пост с фото и текстом</div>'
+                 '<a class="tgme_widget_message_date" href="https://t.me/c/1">'
+                 '<time datetime="2026-09-30T10:00:00+00:00"></time></a></div>').encode()
+        items = nb.parse_telegram(html_, {"name": "CC", "tag": "x"})
+        self.assertEqual(items[0].image, "https://cdn.tg/p.jpg")
+        off = nb.parse_telegram(html_, {"name": "CC", "tag": "x", "images": False})
+        self.assertIsNone(off[0].image)
+
+    def test_send_photo_ok(self):
+        urls = []
+
+        def post(url, json, timeout):
+            urls.append(url.rsplit("/", 1)[1])
+            return FakeResp(200)
+        with mock.patch.object(nb.requests, "post", side_effect=post):
+            nb.send("tok", "@c", "<b>hi</b>", True, "https://img.ru/a.jpg")
+        self.assertEqual(urls, ["sendPhoto"])
+
+    def test_send_photo_falls_back_to_text(self):
+        urls = []
+
+        def post(url, json, timeout):
+            urls.append(url.rsplit("/", 1)[1])
+            return FakeResp(400, {"description": "failed to get HTTP URL content"}) if "Photo" in url else FakeResp(200)
+        with mock.patch.object(nb.requests, "post", side_effect=post):
+            nb.send("tok", "@c", "hi", True, "https://img.ru/a.jpg")
+        self.assertEqual(urls, ["sendPhoto", "sendMessage"])
+
+    def test_send_photo_rate_limit_not_swallowed(self):
+        with mock.patch.object(nb.requests, "post", return_value=FakeResp(500, {"description": "oops"})):
+            with self.assertRaises(nb.TelegramError):
+                nb.send("tok", "@c", "hi", True, "https://img.ru/a.jpg")
+
+    def test_caption_fits_1024(self):
+        it = nb.Item("Src", "x", "Заголовок " * 10, "https://a.ru/1", "Очень длинное резюме. " * 60, nb.now())
+        text = nb.render(it, {"max_summary_chars": 350}, with_image=True)
+        self.assertLessEqual(len(text), 1000)
+        self.assertIn("Src", text)  # подпись с источником не потерялась
+
+    def test_devpost_thumbnail(self):
+        payload = {"hackathons": [{"title": "AI Hack", "url": "https://ai.devpost.com/",
+                                   "displayed_location": {"location": "Online"},
+                                   "thumbnail_url": "//d1.cloudfront.net/a.png"}]}
+        with mock.patch.object(nb, "http_get", lambda url, **k: json.dumps(payload).encode()):
+            items = nb.fetch_devpost({"name": "Devpost", "kind": "opportunity"})
+        self.assertEqual(items[0].image, "https://d1.cloudfront.net/a.png")
+
+
+class Round3(unittest.TestCase):
+    def test_ctftime_logo_single_slash_and_online_only(self):
+        t = nb.now()
+        base = {"ctftime_url": "https://ctftime.org/event/%d", "start": (t + timedelta(days=1)).isoformat(),
+                "finish": (t + timedelta(days=2)).isoformat(), "format": "Jeopardy", "weight": 1.0}
+        payload = [dict(base, title="OnlineCTF", ctftime_url="https://ctftime.org/event/1", onsite=False,
+                        restrictions="Open", logo="//media/events/a.png"),
+                   dict(base, title="LogoCTF", ctftime_url="https://ctftime.org/event/3", onsite=False,
+                        restrictions="Academic", logo="/media/events/b.png"),
+                   dict(base, title="OnsiteCTF", ctftime_url="https://ctftime.org/event/2", onsite=True,
+                        location="Barnaul", restrictions="Open")]
+        with mock.patch.object(nb, "http_get", lambda url, **k: json.dumps(payload).encode()):
+            items = nb.fetch_ctftime({"name": "CTFtime", "kind": "opportunity", "online_only": True})
+        self.assertEqual([i.title for i in items], ["OnlineCTF", "LogoCTF"])
+        self.assertEqual(items[0].image, "https://ctftime.org/media/events/a.png")
+        self.assertEqual(items[1].image, "https://ctftime.org/media/events/b.png")
+        self.assertIn("студенческие", items[1].summary)
+        with mock.patch.object(nb, "http_get", lambda url, **k: json.dumps(payload).encode()):
+            self.assertEqual(len(nb.fetch_ctftime({"name": "CTFtime", "kind": "opportunity"})), 3)
+
+    def test_devpost_pages_and_dedupe(self):
+        pages = {1: [{"title": "Ending", "url": "https://e.devpost.com/", "displayed_location": {"location": "Online"},
+                      "time_left_to_submission": "about 2 hours left"}],
+                 2: [{"title": "Good Hack", "url": "https://g.devpost.com/", "displayed_location": {"location": "Online"},
+                      "time_left_to_submission": "about 1 month left"}],
+                 3: [{"title": "Good Hack", "url": "https://g.devpost.com/", "displayed_location": {"location": "Online"}}]}
+
+        def get(url, **k):
+            return json.dumps({"hackathons": pages[int(url.rsplit("=", 1)[1])]}).encode()
+        with mock.patch.object(nb, "http_get", get):
+            items = nb.fetch_devpost({"name": "Devpost", "kind": "opportunity"})
+        self.assertEqual([i.title for i in items], ["Good Hack"])  # страница 1 отфильтрована, дубль убран
+
+    def test_telegram_promo_signature_removed(self):
+        html_ = ('<div class="tgme_widget_message"><div class="tgme_widget_message_text">'
+                 'Satisfactory получит платное дополнение. Дату релиза не называют. @prepodsteam</div>'
+                 '<a class="tgme_widget_message_date" href="https://t.me/c/1">'
+                 '<time datetime="2026-09-30T10:00:00+00:00"></time></a></div>').encode()
+        it = nb.parse_telegram(html_, {"name": "PS", "tag": "игры"})[0]
+        self.assertNotIn("@prepodsteam", it.summary)
+        self.assertNotIn("@prepodsteam", nb.format_post(it))
+
+    def test_real_topics_from_config(self):
+        import yaml
+        topics = yaml.safe_load(open(nb.CONFIG_PATH, encoding="utf-8"))["topics"]
+        mk = lambda title, summ="": nb.Item("s", "технологии", title, "https://a.ru/1", summ, nb.now())  # noqa: E731
+        self.assertNotIn("разработка", nb.topic_tags(
+            mk("Powercom анонсирует ИБП", "международный разработчик и производитель источников питания"), topics))
+        self.assertIn("техника", nb.topic_tags(mk("Powercom анонсирует ИБП Raptor"), topics))
+        self.assertNotIn("техника", nb.topic_tags(mk("Artificial intelligence breakthrough"), topics))  # не «intel»
+        self.assertEqual(nb.topic_tags(mk("Anthropic собираются на IPO"), topics), ["ИИ"])
+
+
+class HumanCards(unittest.TestCase):
+    def test_dates_and_delta(self):
+        from datetime import datetime, timezone, date
+        a = datetime(2026, 10, 3, 14, 0, tzinfo=timezone.utc)
+        b = datetime(2026, 10, 3, 22, 0, tzinfo=timezone.utc)
+        nb.TZ_HOURS, nb.TZ_LABEL = 5, "по Ташкенту"
+        self.assertEqual(nb.fmt_range(a, b), "сб, 3 октября 2026, 19:00 — вс, 4 октября, 03:00 (по Ташкенту)")
+        self.assertEqual(nb.fmt_range(a, a + timedelta(hours=3)), "сб, 3 октября 2026, 19:00 — 22:00 (по Ташкенту)")
+        self.assertEqual(nb.human_delta(timedelta(days=3, hours=5)), "3 дн. 5 ч.")
+        self.assertEqual(nb.human_delta(timedelta(minutes=90)), "1 ч. 30 мин.")
+        self.assertEqual(nb.human_delta(timedelta(minutes=5)), "5 мин.")
+        self.assertEqual(nb.human_delta(timedelta(seconds=-5)), "уже идёт")
+        self.assertEqual(nb.parse_end_date("Oct 01 - 29, 2026"), date(2026, 10, 29))
+        self.assertEqual(nb.parse_end_date("Sep 29 - Oct 04, 2026"), date(2026, 10, 4))
+        self.assertEqual(nb.parse_end_date("Dec 20, 2026 - Jan 15, 2027"), date(2027, 1, 15))
+        self.assertIsNone(nb.parse_end_date("скоро"))
+
+    def test_ctf_card(self):
+        t = nb.now()
+        payload = [{"title": "CubeCTF 2026", "ctftime_url": "https://ctftime.org/event/9", "format": "Attack-Defense",
+                    "start": (t + timedelta(days=3, hours=5)).isoformat(), "finish": (t + timedelta(days=3, hours=13)).isoformat(),
+                    "onsite": False, "restrictions": "Open", "weight": 24.71,
+                    "organizers": [{"id": 1, "name": "CubeCtf Team"}]}]
+        with mock.patch.object(nb, "http_get", lambda url, **k: json.dumps(payload).encode()):
+            it = nb.fetch_ctftime({"name": "CTFtime", "tag": "ctf", "kind": "opportunity"})[0]
+        text = nb.format_post(it)
+        for must in ("🎯 CubeCTF 2026", "атаковать", "📅 Когда:", "⏳ До старта: 3 дн.", "📝 Регистрация:",
+                     "📍 Формат: Attack-Defense · онлайн", "🔓 Участие: открытое, можно без отбора",
+                     "⭐ Рейтинг: 24.71", "🏢 Организаторы: CubeCtf Team", "📎 Что нужно:", "👉 Что делать:", "#ctf"):
+            self.assertIn(must, text)
+        self.assertLessEqual(len(nb.render(it, {"max_summary_chars": 350}, with_image=True)), 1000)
+
+    def test_codeforces_card(self):
+        t = nb.now()
+        mk = lambda name: {"status": "OK", "result": [{"id": 5, "name": name, "type": "CF", "phase": "BEFORE",  # noqa: E731
+                                                       "durationSeconds": 9000,
+                                                       "startTimeSeconds": int((t + timedelta(days=2)).timestamp())}]}
+        with mock.patch.object(nb, "http_get", lambda url, **k: json.dumps(mk("Codeforces Round (Div. 1)")).encode()):
+            it = nb.fetch_codeforces({"name": "Codeforces", "kind": "opportunity", "tag": "олимпиады"})[0]
+        text = nb.format_post(it)
+        self.assertIn("от 1900", text)
+        self.assertIn("2 ч 30 мин", text)
+        self.assertIn("📝 Регистрация: на странице раунда", text)
+        with mock.patch.object(nb, "http_get", lambda url, **k: json.dumps(mk("R (Codeforces Round, Div. 1 + Div. 2)")).encode()):
+            it2 = nb.fetch_codeforces({"name": "Codeforces", "kind": "opportunity"})[0]
+        self.assertIn("Открыт для всех", it2.details["about"])
+
+    def test_devpost_card(self):
+        payload = {"hackathons": [{"title": "AI Hack", "url": "https://ai.devpost.com/",
+                                   "displayed_location": {"location": "Online"},
+                                   "submission_period_dates": "Oct 01 - 29, 2026", "time_left_to_submission": "about 1 month left",
+                                   "prize_amount": "$<span>25,000</span>", "themes": [{"name": "AI"}, {"name": "Web"}]}]}
+        with mock.patch.object(nb, "http_get", lambda url, **k: json.dumps(payload).encode()):
+            it = nb.fetch_devpost({"name": "Devpost", "kind": "opportunity", "tag": "хакатоны"})[0]
+        text = nb.format_post(it)
+        self.assertIn("📝 Регистрация: сдать проект до 29 октября 2026", text)
+        self.assertIn("🏆 Призы: $25,000", text)
+        self.assertIn("Темы: AI, Web", text)
+        self.assertIn("⏳ Осталось: около 1 мес.", text)
+
+    def test_grant_card(self):
+        t = nb.now()
+        xml = rss([("Новая стипендия 2099", "https://g.org/new", "Deadline: December 31, 2099 Apply now", t)])
+        with mock.patch.object(nb, "http_get", lambda url, **k: xml):
+            it = nb.fetch_rss({"name": "G", "tag": "гранты", "kind": "opportunity", "url": "x"})[0]
+        text = nb.format_post(it)
+        self.assertIn("📝 Регистрация: подать заявку до 31 декабря 2099", text)
+        self.assertIn("⏳ Осталось:", text)
+        self.assertIn("Apply now", text)
+        self.assertIn("👉 Что делать:", text)
+
+    def test_empty_fields_are_skipped(self):
+        it = nb.Item("S", "ctf", "T", "https://a.ru/1", "", nb.now(), kind="opportunity",
+                     details={"about": "Описание", "when": "", "org": "", "todo": "сделай"})
+        text = nb.format_post(it)
+        self.assertNotIn("📅", text)
+        self.assertNotIn("🏢", text)
+        self.assertIn("👉 Что делать: сделай", text)
+
+    def test_telegram_opportunity_keeps_old_layout(self):
+        it = nb.Item("EduGrants", "гранты", "Результаты конкурса", "https://t.me/c/1", "Список победителей", nb.now(),
+                     kind="opportunity")
+        text = nb.format_post(it)
+        self.assertIn("🎯 Результаты конкурса", text)
+        self.assertIn("Список победителей", text)
+
+
+class Readable(unittest.TestCase):
+    def test_subheading_not_glued_to_text(self):
+        raw = "<h2>Провайдер использует три десятка B300</h2><p> В сети оператора нашли 32 ускорителя.</p>"
+        self.assertEqual(nb.clean_text(raw), "Провайдер использует три десятка B300. В сети оператора нашли 32 ускорителя.")
+
+    def test_inline_tags_keep_words_together(self):
+        self.assertEqual(nb.clean_text("Сумма <b>$25,000</b>, сроки — <a href='x'>тут</a>."), "Сумма $25,000, сроки — тут.")
+
+    def test_read_more_tail_removed(self):
+        raw = "<p>Разбираем, почему релизы замедляются.</p><p>— Читать дальше «<a href='x'>Ловушка масштаба</a>»</p>"
+        self.assertEqual(nb.strip_junk(nb.clean_text(raw)), "Разбираем, почему релизы замедляются.")
+        self.assertEqual(nb.strip_junk("Эксперты обсудили предложения.."), "Эксперты обсудили предложения.")
+
+    def test_lead_skips_repeated_lead_and_cut_tail(self):
+        text = ("Власти обсуждают прекращение выдач по ИТ-ипотеке в декабре 2026 года вместо 2030-го. "
+                "Решение пока не принято. Власти обсуждают прекращение выдач по ИТ-ипотеке уже в декабре 2026 года. "
+                "Сейчас программа рассчитана до 2030 года. Специалисты выявили оборудование удалённо, но устан")
+        self.assertEqual(nb.lead(text, 350), "Власти обсуждают прекращение выдач по ИТ-ипотеке в декабре 2026 года "
+                         "вместо 2030-го. Решение пока не принято. Сейчас программа рассчитана до 2030 года.")
+        self.assertEqual(nb.lead("Решение не принято, ставки сохранят. Срок до 2030 года. Решение не принято.", 350),
+                         "Решение не принято, ставки сохранят. Срок до 2030 года.")
+
+    def test_ellipsis_after_full_stop_removed(self):
+        self.assertEqual(nb.strip_junk("Вышла версия для Switch 2.…"), "Вышла версия для Switch 2.")
+
+    def test_lead_single_cut_sentence_gets_ellipsis(self):
+        self.assertEqual(nb.lead("Компания показала новый робот, который умеет", 350),
+                         "Компания показала новый робот, который умеет…")
+
+    def test_rss_title_trailing_dot_removed(self):
+        page = rss([("Эксперты оценили налоговые предложения.", "https://kun.uz/1", "Текст.", nb.now())])
+        with mock.patch.object(nb, "http_get", lambda url, **k: page):
+            items = nb.fetch_rss({"name": "Kun.uz", "url": "x", "tag": "узбекистан", "topics": False})
+        self.assertEqual(items[0].title, "Эксперты оценили налоговые предложения")
+        self.assertFalse(items[0].auto_tags)
+
+    def test_footer_says_where_to_read(self):
+        it = nb.Item("iXBT", "техника", "Заголовок новости", "https://ixbt.com/1", "Текст.", nb.now(), tags=["ИИ"])
+        self.assertTrue(nb.format_post(it).endswith('#ИИ\n🔗 <a href="https://ixbt.com/1">Читать полностью</a> · iXBT'))
+
+
+class Rotation(unittest.TestCase):
+    def items(self, source, tag, n, t):
+        return [nb.Item(source, tag, f"Новость {source} номер {i}", f"https://{source}.ru/{i}", "", t - timedelta(minutes=i))
+                for i in range(n)]
+
+    def test_least_recently_posted_source_goes_first(self):
+        t = nb.now()
+        items = self.items("Частый", "IT", 5, t) + self.items("Редкий", "наука", 1, t - timedelta(hours=3))
+        last = {"Частый": nb.iso(t - timedelta(minutes=10))}  # «Редкий» ещё ни разу не публиковался
+        picks = nb.pick_news(items, 1, last, {})
+        self.assertEqual(picks[0].source, "Редкий")
+
+    def test_tag_cap(self):
+        t = nb.now()
+        items = self.items("BBC", "мир", 3, t) + self.items("DW", "мир", 3, t) + self.items("Хабр", "IT", 3, t)
+        picks = nb.pick_news(items, 6, {}, {"мир": 1})
+        self.assertEqual(sum(p.tag == "мир" for p in picks), 1)
+        self.assertEqual(sum(p.tag == "IT" for p in picks), 3)
+
+    def test_daily_tag_cap_counts_sent_posts(self):
+        t = nb.now()
+        cfg = {"settings": dict(max_age_hours=12, min_title_len=5, title_similarity=0.75, max_posts_per_run=5,
+                                max_posts_per_day=30, tag_limits_per_day={"мир": 2}), "ad_words": []}
+        state = {"seen": {}, "titles": [], "sent_log": [], "sent_log_opp": [],
+                 "sent_tags": [{"tag": "мир", "ts": nb.iso(t - timedelta(hours=1))},
+                               {"tag": "мир", "ts": nb.iso(t - timedelta(hours=30))}]}  # вторая уже за сутками
+        picks = nb.select(self.items("BBC", "мир", 3, t) + self.items("Хабр", "IT", 3, t), cfg, state)
+        self.assertEqual(sum(p.tag == "мир" for p in picks), 1)
 
 
 if __name__ == "__main__":

@@ -1,24 +1,25 @@
 # Настройки и список источников. Отключить источник: enabled: false
-# ВАЖНО: часть адресов я не мог проверить отсюда. Пробный запуск (dry_run) покажет, какие работают.
+# Все источники на русском. Пробный запуск (dry_run) покажет, какие сейчас отвечают.
 
 settings:
-  max_age_hours: 24        # новости старше этого возраста игнорируются
-  max_posts_per_run: 5     # новости: максимум за один запуск
-  max_posts_per_day: 20    # новости: максимум за сутки
-  max_opportunities_per_run: 5   # соревнования, гранты, стипендии: за запуск
-  max_opportunities_per_day: 12  # ...и за сутки (отдельно от новостей)
+  max_age_hours: 12        # новости старше этого возраста игнорируются
+  max_posts_per_run: 5     # максимум постов за один запуск
+  max_posts_per_day: 30    # максимум постов за сутки
+  tag_limits_per_day:      # отдельный потолок за сутки для тегов источников (чтобы политики было немного)
+    мир: 4
+    узбекистан: 2
   timezone_offset_hours: 5       # время в постах: Узбекистан = UTC+5
   timezone_label: "по Ташкенту"   # подпись к времени в постах
   delay_seconds: 3         # пауза между постами в канале
   title_similarity: 0.75   # 0..1, выше = строже склеивает дубли (подкручивать по результатам)
-  min_title_len: 15        # для новостей (у соревнований названия бывают короткими)
-  max_summary_chars: 350
+  min_title_len: 15
+  max_summary_chars: 350   # текст поста: столько символов законченными предложениями
   state_days: 60           # сколько дней помнить уже отправленное
   title_memory_days: 30    # сколько дней сравнивать новые заголовки со старыми
   link_preview: true       # карточка со ссылкой под постом (если у поста нет фото)
   images: true             # отправлять посты с фото, если оно нашлось (у источника можно images: false)
 
-# Записи с этими фрагментами (в заголовке или тексте) считаются рекламой
+# Записи с этими фрагментами (в заголовке или тексте) не публикуются: реклама и развлекательные тесты
 ad_words:
   - "на правах рекламы"
   - "erid"
@@ -27,43 +28,67 @@ ad_words:
   - "партнерский материал"
   - "розыгрыш"
   - "скидк"
+  # викторины и тесты (их много у «Популярной механики»)
+  - "отличия за"
+  - "попробуйте найти"
+  - "сможете ли вы"
+  - "сможете найти"
+  - "сможете отыскать"
+  - "сможете разгадать"
+  - "найдите на картинке"
+  - "угадайте"
+  - "разминка"
+  - "проверка зоркости"
+  - "проверьте свой"
+  - "каверзных вопрос"
+  - "тест на внимательность"
+  - "тест-вопрос"
+  - "тест-минутк"
+  - "ответите на"
+  - "кругозор"
+  - "логическую загадку"
+  - "головоломк"
+  - "гороскоп"
+  - "викторин"
+  - "кроссворд"
 
-# Теги новостей по теме (берутся первые 2 подходящих). Если ничего не подошло, берётся тег источника.
+# Теги по теме (берутся первые 2 подходящих). Если ничего не подошло, берётся тег источника.
 # Это регулярные выражения по заголовку и тексту (без учёта регистра).
 topics:
-  ИИ: ['\bии\b', 'нейросет', 'искусственн\w+ интеллект', 'chatgpt', 'openai', 'anthropic', 'claude', 'gemini', '\bllm\b', '\bgpt', 'deepseek', 'copilot']
-  безопасность: ['уязвимост', 'взлом', 'хакер', 'утечк', 'кибер', 'фишинг', 'malware', 'ransomware', '\bcve-', 'шифровальщик', 'вирус']
-  разработка: ['\bpython', '\brust\b', '\bgo\b', 'golang', '\bphp\b', 'javascript', 'typescript', 'kotlin', 'github', 'программист', 'программирован', 'фреймворк', 'open source', 'linux', 'docker', 'devops', 'репозитор', 'компилятор', '\bapi\b', 'баз\w+ данных']
-  железо: ['процессор', 'видеокарт', '\bssd\b', 'nvidia', '\bamd\b', '\bintel\b', 'смартфон', 'ноутбук', 'чипсет', 'оперативн', 'гаджет', 'iphone', '\bибп\b', 'монитор', 'роутер', 'сервер', 'видеопамят']
+  ИИ: ['\bии\b', 'нейросет', 'искусственн\w+ интеллект', 'машинн\w+ обучени', 'chatgpt', 'openai', 'anthropic', 'claude', 'gemini', '\bllm\b', '\bgpt', 'deepseek', 'copilot', 'qwen', '\bgrok\b', 'midjourney', 'gigachat', 'гигачат']
+  роботы: ['робот', 'гуманоид', 'беспилот', 'boston dynamics', 'unitree']
+  безопасность: ['уязвимост', 'взлом', 'хакер', 'утечк\w* данных', 'кибер', 'фишинг', 'malware', 'ransomware', '\bcve-', 'шифровальщик', 'вирус']
+  опенсорс: ['open[ -]source', 'открыт\w* (исходн|код)', 'опенсорс', '\blinux', 'дистрибутив', '\bgnu\b', 'freebsd', 'github', 'gitlab']
+  разработка: ['\bpython', '\brust\b', '\bgo\b', 'golang', '\bphp\b', '\bjava\b', 'javascript', 'typescript', 'kotlin', 'c\+\+', 'программист', 'программирован', 'фреймворк', 'docker', 'kubernetes', 'devops', 'репозитор', 'компилятор', '\bapi\b', 'баз\w+ данных']
+  техника: ['процессор', 'видеокарт', '\bssd\b', 'nvidia', '\bamd\b', '\bintel\b', 'смартфон', 'ноутбук', 'чипсет', 'оперативн\w+ памят', 'гаджет', 'iphone', 'android', 'samsung', 'xiaomi', '\bибп\b', 'монитор', 'роутер', 'сервер', 'видеопамят', 'наушник', 'электромобил']
+  космос: ['космос', 'космическ', '\bnasa\b', 'роскосмос', 'spacex', 'starship', 'ракета-носител', 'спутник', '\bмарс', '\bлун[аеуы]\b', 'астероид', 'телескоп', 'орбит', '\bмкс\b']
+  наука: ['учёны', 'ученые', 'исследовател', 'физик', 'биолог', 'генетик', 'палеонтолог', 'археолог']
   игры: ['\bигр', 'steam', 'playstation', 'xbox', 'nintendo', 'геймер']
-  наука: ['учёны', 'ученые', 'исследовател', 'физик', 'астроном', 'космос', 'биолог', 'генетик']
 
+# topics: false — у источника не подбираются теги по теме, в посте только его тег (например #мир)
 sources:
-  # --- Разработка и IT ---
-  - {name: Хабр,      type: rss, url: "https://habr.com/ru/rss/articles/?fl=ru", tag: разработка}
-  - {name: Tproger,   type: rss, url: "https://tproger.ru/feed",                 tag: разработка}
-  - {name: Proglib,   type: rss, url: "https://proglib.io/feed",                 tag: разработка}
-  - {name: vc.ru,     type: rss, url: "https://vc.ru/rss/all",                   tag: технологии}
-  # --- Гаджеты и железо ---
-  - {name: 3DNews,      enabled: false, type: rss, url: "https://3dnews.ru/breakingnews/rss/", tag: технологии}  # адрес 404, нужен другой
-  - {name: iXBT,        type: rss, url: "https://www.ixbt.com/export/news.rss",   tag: технологии}
-  - {name: Overclockers, type: rss, url: "https://overclockers.ru/rss/all.rss",   tag: технологии}
-  - {name: CNews,       type: rss, url: "https://www.cnews.ru/inc/rss/news.xml",  tag: технологии}
-  # --- Наука и факты ---
-  - {name: N+1,          type: rss, url: "https://nplus1.ru/rss",                 tag: наука}
-  - {name: Naked Science, type: rss, url: "https://naked-science.ru/feed",        tag: наука}
-  # --- Telegram-каналы (только публичные) ---
-  - {name: CodeCamp,    type: telegram, preview: false, channel: campcode,           tag: разработка}
-  - {name: S010lvloon,  type: telegram, preview: false, channel: S010lvloon_channel, tag: безопасность}
-  - {name: Прогер,      type: telegram, preview: false, channel: proger3,            tag: разработка}
-  - {name: PrepodSteam, type: telegram, preview: false, channel: prepodsteam,        tag: игры}
-
-  # === ВОЗМОЖНОСТИ: соревнования, гранты, стипендии (свои лимиты, посты со значком 🎯) ===
-  - {name: CTFtime,    type: ctftime, preview: false,    kind: opportunity, tag: ctf,       days_ahead: 30, online_only: true}
-  - {name: Codeforces, type: codeforces, preview: false, kind: opportunity, tag: олимпиады, days_ahead: 14}
-  - {name: Devpost,    type: devpost,    kind: opportunity, tag: хакатоны}
-  - {name: OpportunityDesk,      type: rss, url: "https://opportunitydesk.org/feed/",            kind: opportunity, tag: гранты}
-  # Scholars4Dev и ScholarshipPositions отключены: отдали не RSS, нужны другие адреса
-  - {name: Scholars4Dev, enabled: false,         type: rss, url: "https://www.scholars4dev.com/feed/",            kind: opportunity, tag: стипендии}
-  - {name: ScholarshipPositions, enabled: false, type: rss, url: "https://www.scholarship-positions.com/feed/",   kind: opportunity, tag: стипендии}
-  - {name: EduGrants, type: telegram, preview: false, channel: edugrandsuz_results, kind: opportunity, tag: гранты}
+  # --- IT и техника ---
+  - {name: Хабр,        type: rss, url: "https://habr.com/ru/rss/news/?fl=ru",   tag: IT}
+  - {name: Код Дурова,  type: rss, url: "https://kod.ru/rss/",                    tag: IT}
+  - {name: 3DNews,      type: rss, url: "https://3dnews.ru/news/rss/",            tag: техника}
+  - {name: iXBT,        type: rss, url: "https://www.ixbt.com/export/news.rss",   tag: техника}
+  # --- ИИ, роботы, технологии будущего ---
+  - {name: Хабр ИИ,     type: rss, url: "https://habr.com/ru/rss/hubs/artificial_intelligence/news/?fl=ru", tag: ИИ}
+  - {name: Хайтек+,     type: rss, url: "https://hightech.plus/feed.rss",         tag: технологии}
+  # --- программирование и open source ---
+  - {name: Proglib,      type: rss, url: "https://proglib.io/feed",                               tag: разработка}
+  - {name: OpenNET,      type: rss, url: "https://www.opennet.ru/opennews/opennews_all_utf.rss", tag: опенсорс}
+  - {name: Linux.org.ru, type: rss, url: "https://www.linux.org.ru/section-rss.jsp?section=1",    tag: опенсорс}
+  # --- наука, открытия, интересные факты ---
+  - {name: Naked Science,       type: rss, url: "https://naked-science.ru/feed",               tag: наука}
+  - {name: Популярная механика, type: rss, url: "https://www.popmech.ru/out/public-all.xml",   tag: наука}
+  - {name: Хайтек,              type: rss, url: "https://hightech.fm/feed.rss",               tag: наука}
+  # --- игры ---
+  - {name: StopGame,  type: rss, url: "https://rss.stopgame.ru/rss_news.xml",    tag: игры}
+  - {name: Игромания, type: rss, url: "https://www.igromania.ru/rss/news.rss",   tag: игры}
+  - {name: Shazoo,    type: rss, url: "https://shazoo.ru/feed/rss",              tag: игры}
+  # --- мир и немного политики (потолок за сутки в tag_limits_per_day) ---
+  - {name: BBC,       type: rss, url: "https://feeds.bbci.co.uk/russian/rss.xml", tag: мир,        topics: false}
+  - {name: DW,        type: rss, url: "https://rss.dw.com/rdf/rss-ru-news",       tag: мир,        topics: false}
+  - {name: Kun.uz,    type: rss, url: "https://kun.uz/news/rss?lang=ru",          tag: узбекистан, topics: false}
+  - {name: Gazeta.uz, type: rss, url: "https://www.gazeta.uz/ru/rss/",            tag: узбекистан, topics: false}
